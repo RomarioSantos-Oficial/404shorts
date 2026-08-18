@@ -222,10 +222,19 @@ def create_automatic_cuts(
         if callable(release):
             release()
     _check_cancelled(cancelled)
+    suggestions_message = (
+        f"{len(analysis.suggestions)} cortes encontrados e validados; preparando versões verticais…"
+        if analysis.suggestions
+        else (
+            "A análise terminou, mas nenhum limite editorial foi aprovado. "
+            "A transcrição pode estar sem pausas/pontuação suficientes; revise a transcrição "
+            "ou reduza a duração mínima para testar novamente."
+        )
+    )
     _update(
         progress,
         "suggestions_ready",
-        f"{len(analysis.suggestions)} cortes encontrados e validados; preparando versões verticais…",
+        suggestions_message,
         suggestions=list(analysis.suggestions),
     )
 
@@ -323,7 +332,14 @@ def create_automatic_cuts(
     _update(
         progress,
         "complete",
-        f"Fluxo automático concluído · {len(analysis.suggestions)} cortes · {len(previews)} versões.",
+        (
+            f"Fluxo automático concluído · {len(analysis.suggestions)} cortes · {len(previews)} versões."
+            if analysis.suggestions
+            else (
+                "Fluxo concluído sem cortes: nenhum intervalo com início independente e "
+                "fim seguro foi encontrado."
+            )
+        ),
     )
     return AutomaticPipelineResult(
         metadata=metadata,

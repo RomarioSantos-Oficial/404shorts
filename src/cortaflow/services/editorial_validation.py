@@ -16,6 +16,7 @@ from cortaflow.domain.subtitle import TranscriptWord
 
 MINIMUM_SPEECH_GAP_MS = 80
 LONG_DISCOURSE_PAUSE_MS = 1_500
+TRANSCRIPT_PAUSE_MS = 450
 CONTEXT_WINDOW_MS = 30_000
 CONTEXT_WORD_LIMIT = 90
 
@@ -95,6 +96,7 @@ def assess_word_range(
         or starts_after_silence
         or (not has_audio_boundaries and previous_is_complete)
     )
+    ends_after_transcript_pause = end_gap >= TRANSCRIPT_PAUSE_MS
     end_safe = (
         following is None
         or end_gap >= MINIMUM_SPEECH_GAP_MS
@@ -102,7 +104,10 @@ def assess_word_range(
         or (not has_audio_boundaries and last_is_complete)
     )
     start_independent = _independent_opening(words[start_index : min(end_index + 1, start_index + 12)])
-    end_complete = last_is_complete
+    # Some Whisper outputs contain reliable word timestamps but little or no
+    # sentence punctuation. A meaningful pause is still a conservative speech
+    # boundary; it should be reviewable, not discarded as an unfinished idea.
+    end_complete = last_is_complete or ends_before_silence or ends_after_transcript_pause
     checks = (start_safe, end_safe, start_independent, end_complete)
     score = sum(checks) / len(checks)
     problems: list[str] = []

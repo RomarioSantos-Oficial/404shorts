@@ -382,9 +382,16 @@ class MainWindow(QMainWindow):
         self.suggestions_page.set_previews(result.previews)
         self.suggestions_page.set_media_source(self.project.source_path)
         complete_message = (
-            f"Concluído: {len(result.analysis.suggestions)} cortes; "
-            f"{sum(item.framing_status == 'validated' for item in result.analysis.suggestions)} "
-            "com rosto validado. Assista e use Editar e salvar este corte."
+            (
+                f"Concluído: {len(result.analysis.suggestions)} cortes; "
+                f"{sum(item.framing_status == 'validated' for item in result.analysis.suggestions)} "
+                "com rosto validado. Assista e use Editar e salvar este corte."
+            )
+            if result.analysis.suggestions
+            else (
+                "Análise concluída sem cortes. A transcrição não forneceu limites editoriais "
+                "suficientemente seguros; revise a transcrição ou reduza a duração mínima."
+            )
         )
         self.suggestions_page.set_processing(False, complete_message)
         self._sync_editor_state()

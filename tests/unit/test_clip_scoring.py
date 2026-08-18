@@ -19,6 +19,30 @@ def test_suggestions_align_to_complete_sentences_and_do_not_duplicate() -> None:
             assert overlap == 0
 
 
+def test_transcript_pauses_create_reviewable_candidates_without_punctuation() -> None:
+    words = [
+        TranscriptWord(
+            text=f"comentario{index}",
+            start_ms=index * 700,
+            end_ms=index * 700 + 200,
+        )
+        for index in range(120)
+    ]
+    suggestions = suggest_clips(
+        Transcript(language="pt", words=words),
+        84_000,
+        settings=ClipSelectionSettings(
+            min_seconds=5,
+            preferred_seconds=20,
+            max_seconds=30,
+            max_results=5,
+        ),
+    )
+    assert suggestions
+    assert all(item.end_ms > item.start_ms for item in suggestions)
+    assert all(item.editorial_status in {"validated", "needs_review"} for item in suggestions)
+
+
 def test_scene_alignment_improves_candidate_score() -> None:
     words = []
     for index in range(60):

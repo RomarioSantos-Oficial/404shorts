@@ -162,7 +162,11 @@ def suggest_clips(
             if duration > maximum_ms or word.end_ms > total_duration_ms:
                 break
             fallback_ends.append(end_index)
-            if _ends_sentence(word.text) or _near_boundary(word.end_ms, speech_boundaries):
+            if (
+                _ends_sentence(word.text)
+                or _near_boundary(word.end_ms, speech_boundaries)
+                or _near_transcript_pause(words, end_index)
+            ):
                 natural_ends.append(end_index)
         # A fallback is only used when a range contains no sentence/pause ending.
         available = natural_ends or fallback_ends[-1:]
@@ -364,7 +368,7 @@ def _score_candidate(
     end_word = words[end_index]
     recoverable_editorial_issue = (
         not editorial.passes
-        and _ends_sentence(end_word.text)
+        and editorial.end_complete
         and any(
             (
                 not editorial.start_safe,
@@ -599,6 +603,13 @@ class _FaceIndex:
 
 def _ends_sentence(text: str) -> bool:
     return text.rstrip().endswith((".", "!", "?", ":", ";"))
+
+
+def _near_transcript_pause(words: list, end_index: int, minimum_gap_ms: int = 450) -> bool:
+    """Treat a reliable inter-word pause as a reviewable natural boundary."""
+    if end_index + 1 >= len(words):
+        return True
+    return words[end_index + 1].start_ms - words[end_index].end_ms >= minimum_gap_ms
 
 
 def _near_boundary(
