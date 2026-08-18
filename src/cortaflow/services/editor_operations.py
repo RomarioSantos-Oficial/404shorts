@@ -1,0 +1,118 @@
+"""Pure timeline editing operations used by undoable UI commands."""
+
+from uuid import uuid4
+
+from cortaflow.domain.editing import TimelineClip
+
+
+def create_initial_clips(duration_ms: int, label: str = "Mídia original") -> list[TimelineClip]:
+    if duration_ms <= 0:
+        return []
+    group = uuid4().hex
+    return [
+        TimelineClip(
+            clip_id=f"{group}-video",
+            track="video",
+            source_start_ms=0,
+            source_end_ms=duration_ms,
+            timeline_start_ms=0,
+            label=label,
+        ),
+        TimelineClip(
+            clip_id=f"{group}-audio",
+            track="audio",
+            source_start_ms=0,
+            source_end_ms=duration_ms,
+            timeline_start_ms=0,
+            label=label,
+        ),
+    ]
+
+
+def split_at(clips: list[TimelineClip], position_ms: int) -> list[TimelineClip]:
+    """Split every audio/video clip crossed by the playhead."""
+    changed = False
+    result: list[TimelineClip] = []
+    for clip in clips:
+        if not clip.timeline_start_ms < position_ms < clip.timeline_end_ms:
+            result.append(clip)
+            continue
+        changed = True
+        offset = position_ms - clip.timeline_start_ms
+        split_source = clip.source_start_ms + offset
+        result.extend(
+            (
+                _updated(clip, source_end_ms=split_source),
+                _updated(
+                    clip,
+                    clip_id=f"{uuid4().hex}-{clip.track}",
+                    source_start_ms=split_source,
+                    timeline_start_ms=position_ms,
+                ),
+            )
+        )
+    if not changed:
+        raise ValueError("O cursor deve estar dentro de um clipe para dividir.")
+    return sorted(result, key=lambda item: (item.track, item.timeline_start_ms))
+
+
+def delete_clip(clips: list[TimelineClip], clip_id: str) -> list[TimelineClip]:
+    result = [clip for clip in clips if clip.clip_id != clip_id]
+    if len(result) == len(clips):
+        raise ValueError("Selecione um clipe válido para excluir.")
+    return result
+
+
+def move_clip(clips: list[TimelineClip], clip_id: str, timeline_start_ms: int) -> list[TimelineClip]:
+    if timeline_start_ms < 0:
+        raise ValueError("A posição do clipe não pode ser negativa.")
+    found = False
+    result = []
+    for clip in clips:
+        if clip.clip_id == clip_id:
+            found = True
+            result.append(_updated(clip, timeline_start_ms=timeline_start_ms))
+        else:
+            result.append(clip)
+    if not found:
+        raise ValueError("Clipe não encontrado.")
+    return result
+
+
+def trim_clip(
+    clips: list[TimelineClip],
+    clip_id: str,
+    source_start_ms: int,
+    source_end_ms: int,
+) -> list[TimelineClip]:
+    found = False
+    result = []
+    for clip in clips:
+        if clip.clip_id == clip_id:
+            found = True
+            result.append(_updated(clip, source_start_ms=source_start_ms, source_end_ms=source_end_ms))
+        else:
+            result.append(clip)
+    if not found:
+        raise ValueError("Clipe não encontrado.")
+    return result
+
+
+def set_transition(clips: list[TimelineClip], clip_id: str, duration_ms: int) -> list[TimelineClip]:
+    found = False
+    result = []
+    for clip in clips:
+        if clip.clip_id == clip_id:
+            found = True
+            result.append(_updated(clip, transition_ms=duration_ms))
+        else:
+            result.append(clip)
+    if not found:
+        raise ValueError("Clipe não encontrado.")
+    return result
+
+
+def _updated(clip: TimelineClip, **changes: object) -> TimelineClip:
+    payload = clip.model_dump()
+    payload.update(changes)
+    return TimelineClip.model_validate(payload)

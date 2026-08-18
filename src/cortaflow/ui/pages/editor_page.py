@@ -1,0 +1,486 @@
+"""Basic, responsive player/editor page."""
+
+from pathlib import Path
+
+from PySide6.QtCore import QThreadPool, QUrl, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QUndoCommand, QUndoStack
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QSlider,
+    QStackedLayout,
+    QVBoxLayout,
+    QWidget,
+)
+
+from cortaflow.domain.clip import ClipRange, format_timestamp
+from cortaflow.domain.editing import TimelineClip
+from cortaflow.domain.project import ReframeKeyframe
+from cortaflow.domain.tracking import CropFrame
+from cortaflow.services.editor_operations import delete_clip, move_clip, set_transition, split_at, trim_clip
+from cortaflow.services.transcoder import export_clip
+from cortaflow.ui.widgets.timeline import TimelineWidget
+from cortaflow.ui.widgets.reframe_overlay import ReframeOverlay
+from cortaflow.ui.widgets.properties_panel import PropertiesPanel
+from cortaflow.workers.base_worker import FunctionWorker
+
+
+class TimelineStateCommand(QUndoCommand):
+    def __init__(self, page: "EditorPage", before: list[TimelineClip], after: list[TimelineClip], text: str) -> None:
+        super().__init__(text)
+        self.page = page
+        self.before = list(before)
+        self.after = list(after)
+
+    def undo(self) -> None:
+        self.page._apply_timeline_clips(self.before)
+
+    def redo(self) -> None:
+        self.page._apply_timeline_clips(self.after)
+
+
+class EditorPage(QWidget):
+    timeline_changed = Signal(object)
+    settings_changed = Signal(object)
+    reframe_keyframes_changed = Signal(object)
+    def __init__(self) -> None:
+        super().__init__()
+        self.source_path: Path | None = None
+        self.in_ms: int | None = None
+        self.out_ms: int | None = None
+        self.fps = 25.0
+        self.source_width = 0
+        self.source_height = 0
+        self.timeline_clips: list[TimelineClip] = []
+        self.selected_clip_id: str | None = None
+        self.reframe_keyframes: list[ReframeKeyframe] = []
+        self.undo_stack = QUndoStack(self)
+        self.export_worker: FunctionWorker | None = None
+        self.thread_pool = QThreadPool.globalInstance()
+
+        self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.video = QVideoWidget(self)
+        self.player.setAudioOutput(self.audio)
+        self.player.setVideoOutput(self.video)
+        self.audio.setVolume(0.8)
+
+        root_layout = QHBoxLayout(self)
+        editor_body = QWidget()
+        layout = QVBoxLayout(editor_body)
+        root_layout.addWidget(editor_body, 1)
+        self.video_container = QWidget()
+        video_stack = QStackedLayout(self.video_container)
+        video_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        video_stack.addWidget(self.video)
+        self.reframe_overlay = ReframeOverlay()
+        video_stack.addWidget(self.reframe_overlay)
+        layout.addWidget(self.video_container, 1)
+        controls = QHBoxLayout()
+        self.previous_frame_button = self._control_button("◀ quadro", self._previous_frame)
+        self.back_button = self._control_button("−5 s", lambda: self._jump(-5000))
+        controls.addWidget(self.previous_frame_button)
+        controls.addWidget(self.back_button)
+        self.play_button = self._control_button("Reproduzir", self.toggle_playback)
+        controls.addWidget(self.play_button)
+        self.forward_button = self._control_button("+5 s", lambda: self._jump(5000))
+        self.next_frame_button = self._control_button("quadro ▶", self._next_frame)
+        controls.addWidget(self.forward_button)
+        controls.addWidget(self.next_frame_button)
+        self.time_label = QLabel("00:00:00 / 00:00:00")
+        controls.addWidget(self.time_label)
+
+        self.rate = QComboBox()
+        for label, value in (("0,5×", 0.5), ("1×", 1.0), ("1,5×", 1.5), ("2×", 2.0)):
+            self.rate.addItem(label, value)
+        self.rate.setCurrentIndex(1)
+        self.rate.currentIndexChanged.connect(self._set_playback_rate)
+        controls.addWidget(self.rate)
+
+        self.mute_button = QPushButton("Mudo")
+        self.mute_button.setCheckable(True)
+        self.mute_button.toggled.connect(self.audio.setMuted)
+        controls.addWidget(self.mute_button)
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(80)
+        self.volume.setMaximumWidth(120)
+        self.volume.valueChanged.connect(lambda value: self.audio.setVolume(value / 100))
+        controls.addWidget(self.volume)
+        self.fullscreen_button = self._control_button("Tela cheia", self.toggle_fullscreen)
+        controls.addWidget(self.fullscreen_button)
+        layout.addLayout(controls)
+
+        marker_row = QHBoxLayout()
+        self.mark_in_button = self._control_button("Marcar entrada (I)", self.mark_in)
+        self.mark_out_button = self._control_button("Marcar saída (O)", self.mark_out)
+        self.export_button = self._control_button("Exportar corte", self.export_selection)
+        self.cancel_export_button = self._control_button("Cancelar exportação", self.cancel_export)
+        self.cancel_export_button.setEnabled(False)
+        marker_row.addWidget(self.mark_in_button)
+        marker_row.addWidget(self.mark_out_button)
+        marker_row.addWidget(self.export_button)
+        marker_row.addWidget(self.cancel_export_button)
+        marker_row.addStretch()
+        layout.addLayout(marker_row)
+
+        self.export_progress = QProgressBar()
+        self.export_progress.setRange(0, 0)
+        self.export_progress.hide()
+        layout.addWidget(self.export_progress)
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+        self.timeline = TimelineWidget()
+        self.timeline.seek_requested.connect(self.player.setPosition)
+        self.timeline.clip_selected.connect(self._select_clip)
+        self.timeline.clip_move_requested.connect(self.move_selected_clip)
+        layout.addWidget(self.timeline)
+
+        self.properties = PropertiesPanel()
+        self.properties.settings_changed.connect(self._properties_changed)
+        self.properties.clip_update_requested.connect(self._update_clip_properties)
+        self.properties.manual_keyframe_requested.connect(self.add_manual_keyframe)
+        root_layout.addWidget(self.properties)
+
+        self.player.durationChanged.connect(self.timeline.set_duration)
+        self.player.durationChanged.connect(self._duration_changed)
+        self.player.positionChanged.connect(self._position_changed)
+        self.player.playbackStateChanged.connect(self._playback_state_changed)
+        self.player.errorOccurred.connect(self._playback_error)
+        self.video.fullScreenChanged.connect(
+            lambda active: self.fullscreen_button.setText("Sair da tela cheia" if active else "Tela cheia")
+        )
+        self._create_shortcuts()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
+        """Release native multimedia objects before their video widget disappears."""
+        self.player.stop()
+        self.player.setSource(QUrl())
+        self.player.setVideoOutput(None)
+        self.player.setAudioOutput(None)
+        super().closeEvent(event)
+
+    def _properties_changed(self, settings: object) -> None:
+        reframe, subtitle, audio, export = settings
+        self.audio.setVolume(min(1.0, audio.volume / 2))
+        self.settings_changed.emit((reframe, subtitle, audio, export))
+
+    @staticmethod
+    def _control_button(text: str, handler: object) -> QPushButton:
+        button = QPushButton(text)
+        button.clicked.connect(handler)
+        return button
+
+    def _create_shortcuts(self) -> None:
+        bindings = (
+            ("Space", self.toggle_playback),
+            ("Left", self._previous_frame),
+            ("Right", self._next_frame),
+            ("Shift+Left", lambda: self._jump(-5000)),
+            ("Shift+Right", lambda: self._jump(5000)),
+            ("I", self.mark_in),
+            ("O", self.mark_out),
+            ("F11", self.toggle_fullscreen),
+            ("S", self.split_at_cursor),
+            ("Delete", self.delete_selected_clip),
+            ("Ctrl+Z", self.undo_stack.undo),
+            ("Ctrl+Shift+Z", self.undo_stack.redo),
+        )
+        self.shortcuts: list[QShortcut] = []
+        for sequence, handler in bindings:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(handler)
+            self.shortcuts.append(shortcut)
+
+    def load_media(
+        self,
+        path: Path,
+        fps: float | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> None:
+        self.source_path = path.resolve()
+        self.in_ms = 0
+        self.out_ms = None
+        self.fps = fps if fps and fps > 0 else 25.0
+        self.source_width = width or 0
+        self.source_height = height or 0
+        self.timeline.set_markers(self.in_ms, self.out_ms)
+        self.reframe_overlay.set_source_size(width, height)
+        self.status_label.setText(f"Mídia carregada · {self.fps:.3g} FPS")
+        self.player.setSource(QUrl.fromLocalFile(str(self.source_path)))
+
+    def set_selection(self, start_ms: int, end_ms: int) -> None:
+        """Load an externally suggested range into the basic editor."""
+        if end_ms <= start_ms:
+            raise ValueError("O fim do corte deve ser posterior ao início.")
+        self.in_ms = max(0, start_ms)
+        self.out_ms = end_ms
+        self.player.setPosition(self.in_ms)
+        self._update_markers()
+
+    def set_reframe_data(
+        self,
+        tracks,
+        keyframes,
+        selected_track_id: int | None,
+        speaker_keyframes=None,
+    ) -> None:
+        self.reframe_keyframes = list(keyframes)
+        self.reframe_overlay.set_data(
+            tracks,
+            keyframes,
+            selected_track_id,
+            speaker_keyframes,
+        )
+        self.timeline.canvas.track_items["reframe"] = list(keyframes)
+        self.timeline.canvas.update()
+
+    def set_project_editor_state(
+        self,
+        timeline_clips,
+        transcript,
+        scenes,
+        suggestions,
+        reframe_keyframes,
+        reframe_settings,
+        subtitle_style,
+        audio_settings,
+        export_settings,
+    ) -> None:
+        self.timeline_clips = list(timeline_clips)
+        self.reframe_keyframes = list(reframe_keyframes)
+        cues = transcript.cues if transcript else []
+        words = transcript.words if transcript else []
+        self.timeline.set_track_data(
+            self.timeline_clips,
+            transcript=words,
+            subtitles=cues,
+            scenes=scenes,
+            suggestions=suggestions,
+            reframe=reframe_keyframes,
+        )
+        self.properties.set_settings(
+            reframe_settings,
+            subtitle_style,
+            audio_settings,
+            export_settings,
+        )
+        self.undo_stack.clear()
+
+    def split_at_cursor(self) -> None:
+        try:
+            updated = split_at(self.timeline_clips, self.player.position())
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Dividir clipe"))
+
+    def delete_selected_clip(self) -> None:
+        if not self.selected_clip_id:
+            return
+        try:
+            updated = delete_clip(self.timeline_clips, self.selected_clip_id)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Excluir clipe"))
+        self.selected_clip_id = None
+        self.properties.set_selected_clip(None)
+
+    def move_selected_clip(self, clip_id: str, timeline_start_ms: int) -> None:
+        try:
+            updated = move_clip(self.timeline_clips, clip_id, timeline_start_ms)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        if updated != self.timeline_clips:
+            self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Mover clipe"))
+
+    def _update_clip_properties(self, payload: dict) -> None:
+        try:
+            updated = move_clip(self.timeline_clips, payload["clip_id"], payload["timeline_start_ms"])
+            updated = trim_clip(
+                updated,
+                payload["clip_id"],
+                payload["source_start_ms"],
+                payload["source_end_ms"],
+            )
+            updated = set_transition(updated, payload["clip_id"], payload["transition_ms"])
+        except ValueError as exc:
+            QMessageBox.warning(self, "Edição inválida", str(exc))
+            return
+        self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Ajustar clipe"))
+
+    def _select_clip(self, clip_id: str) -> None:
+        self.selected_clip_id = clip_id
+        self.timeline.select_clip(clip_id)
+        self.properties.set_selected_clip(
+            next((clip for clip in self.timeline_clips if clip.clip_id == clip_id), None)
+        )
+
+    def _apply_timeline_clips(self, clips: list[TimelineClip]) -> None:
+        self.timeline_clips = list(clips)
+        self.timeline.canvas.clips = list(clips)
+        self.timeline.canvas.track_items["video"] = [item for item in clips if item.track == "video"]
+        self.timeline.canvas.track_items["audio"] = [item for item in clips if item.track == "audio"]
+        self.timeline.canvas.update()
+        if self.selected_clip_id:
+            self.properties.set_selected_clip(
+                next((clip for clip in clips if clip.clip_id == self.selected_clip_id), None)
+            )
+        self.timeline_changed.emit(list(clips))
+
+    def add_manual_keyframe(self) -> None:
+        if not self.source_width or not self.source_height:
+            return
+        settings = self.properties
+        ratios = {"9:16": (9, 16), "1:1": (1, 1), "4:5": (4, 5)}
+        if settings.aspect.currentText() == "original":
+            width, height = self.source_width, self.source_height
+        else:
+            aspect_w, aspect_h = ratios[settings.aspect.currentText()]
+            width = min(self.source_width, round(self.source_height * aspect_w / aspect_h))
+            height = min(self.source_height, round(width * aspect_h / aspect_w))
+        width = min(self.source_width, max(1, round(width / settings.zoom.value())))
+        height = min(self.source_height, max(1, round(height / settings.zoom.value())))
+        x = min(max(0, settings.crop_x.value()), max(0, self.source_width - width))
+        y = min(max(0, settings.crop_y.value()), max(0, self.source_height - height))
+        timestamp = self.player.position()
+        keyframe = ReframeKeyframe(
+            timestamp_ms=timestamp,
+            crop=CropFrame(x=x, y=y, width=width, height=height),
+            manual=True,
+        )
+        self.reframe_keyframes = [item for item in self.reframe_keyframes if item.timestamp_ms != timestamp]
+        self.reframe_keyframes.append(keyframe)
+        self.reframe_keyframes.sort(key=lambda item: item.timestamp_ms)
+        self.reframe_overlay.keyframes = list(self.reframe_keyframes)
+        self.timeline.canvas.track_items["reframe"] = list(self.reframe_keyframes)
+        self.timeline.canvas.update()
+        self.reframe_keyframes_changed.emit(list(self.reframe_keyframes))
+
+    @property
+    def frame_duration_ms(self) -> int:
+        return max(1, round(1000 / self.fps))
+
+    def toggle_playback(self) -> None:
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def toggle_fullscreen(self) -> None:
+        self.video.setFullScreen(not self.video.isFullScreen())
+
+    def _previous_frame(self) -> None:
+        self.player.pause()
+        self._jump(-self.frame_duration_ms)
+
+    def _next_frame(self) -> None:
+        self.player.pause()
+        self._jump(self.frame_duration_ms)
+
+    def _jump(self, delta_ms: int) -> None:
+        end = self.player.duration() if self.player.duration() > 0 else 2_147_483_647
+        self.player.setPosition(min(end, max(0, self.player.position() + delta_ms)))
+
+    def _set_playback_rate(self, index: int) -> None:
+        value = self.rate.itemData(index)
+        if value is not None:
+            self.player.setPlaybackRate(float(value))
+
+    def _position_changed(self, position: int) -> None:
+        self.timeline.set_position(position)
+        self.reframe_overlay.set_timestamp(position)
+        self.time_label.setText(f"{format_timestamp(position)} / {format_timestamp(self.player.duration())}")
+
+    def _duration_changed(self, duration: int) -> None:
+        self.time_label.setText(f"{format_timestamp(self.player.position())} / {format_timestamp(duration)}")
+
+    def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        text = "Pausar" if state == QMediaPlayer.PlaybackState.PlayingState else "Reproduzir"
+        self.play_button.setText(text)
+
+    def _playback_error(self, error: QMediaPlayer.Error, message: str) -> None:
+        if error != QMediaPlayer.Error.NoError:
+            self.status_label.setText(f"Não foi possível reproduzir a mídia: {message}")
+
+    def mark_in(self) -> None:
+        self.in_ms = self.player.position()
+        self._update_markers()
+
+    def mark_out(self) -> None:
+        self.out_ms = self.player.position()
+        self._update_markers()
+
+    def _update_markers(self) -> None:
+        self.timeline.set_markers(self.in_ms, self.out_ms)
+
+    def export_selection(self) -> None:
+        if self.export_worker is not None:
+            return
+        if not self.source_path or self.out_ms is None:
+            QMessageBox.warning(self, "Corte incompleto", "Importe um vídeo e defina entrada e saída.")
+            return
+        try:
+            clip = ClipRange(start_ms=self.in_ms or 0, end_ms=self.out_ms)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Intervalo inválido", str(exc))
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Exportar corte", "corte.mp4", "Vídeo MP4 (*.mp4)"
+        )
+        if not filename:
+            return
+        destination = Path(filename)
+        if destination.exists():
+            QMessageBox.warning(self, "Arquivo existente", "Escolha um novo nome para não sobrescrever um arquivo.")
+            return
+
+        worker = FunctionWorker(export_clip, self.source_path, destination, clip)
+        worker.signals.progress.connect(self._export_progressed)
+        worker.signals.finished.connect(self._export_finished)
+        worker.signals.failed.connect(self._export_failed)
+        self.export_worker = worker
+        self.export_progress.show()
+        self.export_button.setEnabled(False)
+        self.cancel_export_button.setEnabled(True)
+        self.status_label.setText("Exportando corte…")
+        self.thread_pool.start(worker)
+
+    def cancel_export(self) -> None:
+        if self.export_worker is not None:
+            self.export_worker.cancel()
+            self.cancel_export_button.setEnabled(False)
+            self.status_label.setText("Cancelando exportação…")
+
+    def _export_progressed(self, status: object) -> None:
+        self.status_label.setText("Exportando corte…")
+
+    def _finish_export_state(self) -> None:
+        self.export_worker = None
+        self.export_progress.hide()
+        self.export_button.setEnabled(True)
+        self.cancel_export_button.setEnabled(False)
+
+    def _export_finished(self, destination: Path) -> None:
+        self._finish_export_state()
+        self.status_label.setText(f"Exportação concluída: {destination}")
+        QMessageBox.information(self, "Exportação concluída", f"Arquivo salvo em:\n{destination}")
+
+    def _export_failed(self, message: str) -> None:
+        self._finish_export_state()
+        if "cancelad" in message.lower():
+            self.status_label.setText("Exportação cancelada.")
+            return
+        self.status_label.setText("Exportação não concluída.")
+        QMessageBox.critical(self, "Falha na exportação", message)
