@@ -8,6 +8,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QInputDialog,
     QFileDialog,
     QHBoxLayout,
@@ -32,6 +33,7 @@ from cortaflow.ui.widgets.timeline import TimelineWidget
 from cortaflow.ui.widgets.reframe_overlay import ReframeOverlay
 from cortaflow.ui.widgets.properties_panel import PropertiesPanel
 from cortaflow.ui.widgets.layer_overlay import LayerOverlay
+from cortaflow.ui.widgets.editor_chrome import EditorSectionHeader, EditorToolRail
 from cortaflow.workers.base_worker import FunctionWorker
 
 
@@ -96,10 +98,42 @@ class EditorPage(QWidget):
         self.audio.setVolume(0.8)
 
         root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(10)
+
+        self.tool_rail = EditorToolRail()
+        self.tool_rail.tool_requested.connect(self._handle_tool_request)
+        root_layout.addWidget(self.tool_rail)
+
         editor_body = QWidget()
+        editor_body.setObjectName("editorWorkspace")
         layout = QVBoxLayout(editor_body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
         root_layout.addWidget(editor_body, 1)
+
+        header = QFrame()
+        header.setObjectName("editorHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setSpacing(8)
+        header_layout.addWidget(EditorSectionHeader("Editor completo", "Workspace profissional · sequência não destrutiva"))
+        header_layout.addStretch(1)
+        self.sequence_badge = QLabel("RASCUNHO")
+        self.sequence_badge.setObjectName("editorStatusBadge")
+        header_layout.addWidget(self.sequence_badge)
+        self.undo_button = self._control_button("↶", self.undo_stack.undo)
+        self.undo_button.setObjectName("editorIconButton")
+        self.undo_button.setToolTip("Desfazer (Ctrl+Z)")
+        header_layout.addWidget(self.undo_button)
+        self.redo_button = self._control_button("↷", self.undo_stack.redo)
+        self.redo_button.setObjectName("editorIconButton")
+        self.redo_button.setToolTip("Refazer (Ctrl+Shift+Z)")
+        header_layout.addWidget(self.redo_button)
+        layout.addWidget(header)
+
         self.video_container = QWidget()
+        self.video_container.setObjectName("previewSurface")
         video_stack = QStackedLayout(self.video_container)
         video_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
         video_stack.addWidget(self.video)
@@ -109,7 +143,27 @@ class EditorPage(QWidget):
         self.layer_overlay.layer_selected.connect(self._select_layer)
         self.layer_overlay.layer_moved.connect(self._move_layer)
         video_stack.addWidget(self.layer_overlay)
+        preview_header = QFrame()
+        preview_header.setObjectName("previewHeader")
+        preview_header_layout = QHBoxLayout(preview_header)
+        preview_header_layout.setContentsMargins(12, 6, 12, 6)
+        preview_header_layout.addWidget(QLabel("PREVIEW"))
+        preview_header_layout.addStretch(1)
+        self.preview_format_label = QLabel("Formato original")
+        self.preview_format_label.setObjectName("previewMeta")
+        preview_header_layout.addWidget(self.preview_format_label)
+        layout.addWidget(preview_header)
         layout.addWidget(self.video_container, 1)
+
+        transport_header = QFrame()
+        transport_header.setObjectName("transportHeader")
+        transport_header_layout = QHBoxLayout(transport_header)
+        transport_header_layout.setContentsMargins(10, 4, 10, 4)
+        transport_header_layout.addWidget(QLabel("CONTROLE DE REPRODUÇÃO"))
+        transport_header_layout.addStretch(1)
+        transport_header_layout.addWidget(QLabel("Espaço: reproduzir · I/O: entrada e saída · S: dividir"))
+        layout.addWidget(transport_header)
+
         controls = QHBoxLayout()
         self.previous_frame_button = self._control_button("◀ quadro", self._previous_frame)
         self.back_button = self._control_button("−5 s", lambda: self._jump(-5000))
@@ -151,6 +205,8 @@ class EditorPage(QWidget):
         self.export_button = self._control_button("Exportar sequência", self.export_selection)
         self.add_text_button = self._control_button("+ Texto", self.add_text_layer)
         self.add_image_button = self._control_button("+ Imagem", self.add_image_layer)
+        self.delete_layer_button = self._control_button("Excluir camada", self.delete_selected_layer)
+        self.delete_layer_button.setEnabled(False)
         self.cancel_export_button = self._control_button("Cancelar exportação", self.cancel_export)
         self.cancel_export_button.setEnabled(False)
         marker_row.addWidget(self.mark_in_button)
@@ -158,6 +214,7 @@ class EditorPage(QWidget):
         marker_row.addWidget(self.export_button)
         marker_row.addWidget(self.add_text_button)
         marker_row.addWidget(self.add_image_button)
+        marker_row.addWidget(self.delete_layer_button)
         marker_row.addWidget(self.cancel_export_button)
         marker_row.addStretch()
         layout.addLayout(marker_row)
@@ -168,19 +225,55 @@ class EditorPage(QWidget):
         layout.addWidget(self.export_progress)
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
+        timeline_header = QFrame()
+        timeline_header.setObjectName("timelineHeader")
+        timeline_header_layout = QHBoxLayout(timeline_header)
+        timeline_header_layout.setContentsMargins(10, 6, 10, 6)
+        timeline_header_layout.addWidget(QLabel("TIMELINE MULTIPISTA"))
+        timeline_header_layout.addStretch(1)
+        self.timeline_mode_label = QLabel("Vídeo · Áudio · Legendas · Cenas · IA")
+        self.timeline_mode_label.setObjectName("previewMeta")
+        timeline_header_layout.addWidget(self.timeline_mode_label)
+        layout.addWidget(timeline_header)
+
         self.timeline = TimelineWidget()
+        self.timeline.setObjectName("editorTimeline")
         self.timeline.seek_requested.connect(self.player.setPosition)
         self.timeline.clip_selected.connect(self._select_clip)
         self.timeline.clip_move_requested.connect(self.move_selected_clip)
         self.timeline.clip_trim_requested.connect(self.trim_selected_clip)
         layout.addWidget(self.timeline)
 
+        inspector_header = QFrame()
+        inspector_header.setObjectName("inspectorHeader")
+        inspector_header_layout = QVBoxLayout(inspector_header)
+        inspector_header_layout.setContentsMargins(0, 12, 0, 4)
+        inspector_header_layout.addWidget(QLabel("INSPECTOR"))
+        inspector_hint = QLabel("Selecione um clipe ou camada para editar")
+        inspector_hint.setObjectName("previewMeta")
+        inspector_header_layout.addWidget(inspector_hint)
+
         self.properties = PropertiesPanel()
+        self.properties.setObjectName("editorInspector")
         self.properties.settings_changed.connect(self._properties_changed)
         self.properties.clip_update_requested.connect(self._update_clip_properties)
         self.properties.manual_keyframe_requested.connect(self.add_manual_keyframe)
         self.properties.layer_update_requested.connect(self._update_layer_properties)
-        root_layout.addWidget(self.properties)
+        properties_column = QWidget()
+        properties_column.setObjectName("propertiesColumn")
+        properties_layout = QVBoxLayout(properties_column)
+        properties_layout.setContentsMargins(0, 0, 0, 0)
+        properties_layout.setSpacing(4)
+        properties_layout.addWidget(inspector_header)
+        properties_layout.addWidget(self.properties, 1)
+        properties_column.setMinimumWidth(340)
+        properties_column.setMaximumWidth(420)
+        root_layout.addWidget(properties_column)
+
+        self.undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
+        self.undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
+        self.undo_button.setEnabled(False)
+        self.redo_button.setEnabled(False)
 
         self.player.durationChanged.connect(self.timeline.set_duration)
         self.player.durationChanged.connect(self._duration_changed)
@@ -201,6 +294,27 @@ class EditorPage(QWidget):
         self.player.setVideoOutput(None)
         self.player.setAudioOutput(None)
         super().closeEvent(event)
+
+    def _handle_tool_request(self, tool: str) -> None:
+        """Route the visual tool rail to the current editor capabilities."""
+        self.tool_rail.activate(tool)
+        handlers = {
+            "text": self.add_text_layer,
+            "image": self.add_image_layer,
+        }
+        handler = handlers.get(tool)
+        if handler is not None:
+            handler()
+            return
+        messages = {
+            "media": "Biblioteca de mídia: importe vídeos e imagens pelo fluxo Importar.",
+            "audio": "Áudio selecionado: use a aba Áudio do inspector para volume e normalização.",
+            "captions": "Legendas selecionadas: use a aba Legenda ou a página Legendas para editar o texto.",
+            "effects": "Efeitos serão aplicados à camada selecionada na próxima etapa do editor.",
+            "transitions": "Transições serão configuradas na aba Corte e na biblioteca de transições.",
+            "ai": "Ferramentas IA: use Gerar cortes sugeridos para análise automática da mídia.",
+        }
+        self.status_label.setText(messages.get(tool, "Ferramenta selecionada."))
 
     def _properties_changed(self, settings: object) -> None:
         reframe, subtitle, audio, export = settings
@@ -251,6 +365,10 @@ class EditorPage(QWidget):
         self.timeline.set_markers(self.in_ms, self.out_ms)
         self.reframe_overlay.set_source_size(width, height)
         self.status_label.setText(f"Mídia carregada · {self.fps:.3g} FPS")
+        if width and height:
+            self.preview_format_label.setText(f"{width}×{height} · {self.fps:.3g} FPS")
+        else:
+            self.preview_format_label.setText(f"Formato original · {self.fps:.3g} FPS")
         self.player.setSource(QUrl.fromLocalFile(str(self.source_path)))
 
     def set_selection(self, start_ms: int, end_ms: int) -> None:
@@ -296,12 +414,14 @@ class EditorPage(QWidget):
         self.timeline_clips = list(timeline_clips)
         self.layers = list(layers or [])
         self.sequence = sequence
+        self.sequence_badge.setText("SEQUÊNCIA ATIVA" if sequence is not None else "RASCUNHO")
         self.reframe_keyframes = list(reframe_keyframes)
         cues = transcript.cues if transcript else []
         words = transcript.words if transcript else []
         self.layer_overlay.set_layers(self.layers)
         self.layer_overlay.set_duration(max((item.timeline_end_ms for item in self.timeline_clips), default=1))
         self.properties.set_selected_layer(None)
+        self.delete_layer_button.setEnabled(False)
         self.timeline.set_track_data(
             self.timeline_clips,
             transcript=words,
@@ -432,6 +552,7 @@ class EditorPage(QWidget):
         )
         layer = create_text_layer(sequence, text, start_ms=self.player.position())
         self.sequence = sequence
+        self.sequence_badge.setText("SEQUÊNCIA ATIVA")
         self.selected_layer_id = layer.item_id
         self._apply_layers(sequence.layers)
         self._select_layer(layer.item_id)
@@ -453,8 +574,20 @@ class EditorPage(QWidget):
 
     def _select_layer(self, item_id: str) -> None:
         self.selected_layer_id = item_id
+        self.delete_layer_button.setEnabled(bool(item_id))
         self.layer_overlay.select_layer(item_id)
         self.properties.set_selected_layer(next((layer for layer in self.layers if layer.item_id == item_id), None))
+
+    def delete_selected_layer(self) -> None:
+        if not self.selected_layer_id:
+            self.status_label.setText("Selecione uma camada para excluir.")
+            return
+        updated = [layer for layer in self.layers if layer.item_id != self.selected_layer_id]
+        self.undo_stack.push(LayerStateCommand(self, self.layers, updated, "Excluir camada"))
+        self.selected_layer_id = None
+        self.delete_layer_button.setEnabled(False)
+        self.layer_overlay.select_layer(None)
+        self.properties.set_selected_layer(None)
 
     def _move_layer(self, item_id: str, x_percent: float, y_percent: float) -> None:
         try:
