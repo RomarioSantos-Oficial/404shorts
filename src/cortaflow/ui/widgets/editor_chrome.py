@@ -1,14 +1,23 @@
-"""Professional editor chrome widgets.
+"""Professional editor workspace widgets.
 
-These widgets intentionally contain presentation only. Editing commands remain in
+The widgets in this module are presentation-only. Editing commands remain in
 ``EditorPage`` so the visual redesign does not replace the existing domain or
 service layer.
 """
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
+    QGridLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -16,7 +25,7 @@ from PySide6.QtWidgets import (
 
 
 class EditorToolRail(QFrame):
-    """Compact CapCut-inspired tool rail for the complete editor workspace."""
+    """Compact tool rail kept for compatibility with existing consumers."""
 
     tool_requested = Signal(str)
 
@@ -91,6 +100,195 @@ class EditorToolRail(QFrame):
             button.setChecked(True)
 
 
+class EditorResourcePanel(QFrame):
+    """CapCut-inspired resource browser for the left side of the editor."""
+
+    resource_requested = Signal(str)
+    import_requested = Signal()
+
+    _resources = (
+        ("media", "Mídia", "▧"),
+        ("audio", "Áudio", "♫"),
+        ("text", "Texto", "T"),
+        ("stickers", "Stickers", "★"),
+        ("effects", "Efeitos", "✦"),
+        ("transitions", "Transições", "◈"),
+        ("filters", "Filtros", "◐"),
+        ("captions", "Legendas", "CC"),
+        ("templates", "Modelos", "▤"),
+        ("ai", "IA", "AI"),
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("editorResourcePanel")
+        self.setMinimumWidth(292)
+        self.setMaximumWidth(360)
+        self.buttons: dict[str, QToolButton] = {}
+        self.current_resource = "media"
+        self.current_media: Path | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        top_row = QHBoxLayout()
+        brand = QLabel("CortaFlow")
+        brand.setObjectName("editorResourceBrand")
+        top_row.addWidget(brand)
+        top_row.addStretch(1)
+        self.import_button = QPushButton("＋ Importar")
+        self.import_button.setObjectName("editorImportButton")
+        self.import_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_button.clicked.connect(self.import_requested)
+        top_row.addWidget(self.import_button)
+        layout.addLayout(top_row)
+
+        project_row = QHBoxLayout()
+        project_label = QLabel("BIBLIOTECA")
+        project_label.setObjectName("editorResourceLabel")
+        project_row.addWidget(project_label)
+        project_row.addStretch(1)
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Projeto", "Meu computador", "Favoritos", "Biblioteca"])
+        self.source_combo.setObjectName("editorSourceCombo")
+        project_row.addWidget(self.source_combo)
+        layout.addLayout(project_row)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Pesquisar mídia, texto ou efeitos...")
+        self.search.setObjectName("editorResourceSearch")
+        self.search.textChanged.connect(self._filter_cards)
+        layout.addWidget(self.search)
+
+        category_grid = QGridLayout()
+        category_grid.setContentsMargins(0, 0, 0, 0)
+        category_grid.setHorizontalSpacing(4)
+        category_grid.setVerticalSpacing(4)
+        for index, (key, title, glyph) in enumerate(self._resources):
+            button = QToolButton(self)
+            button.setObjectName("editorResourceButton")
+            button.setText(f"{glyph}  {title}")
+            button.setToolTip(title)
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setMinimumHeight(30)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.clicked.connect(lambda _checked=False, name=key: self._request(name))
+            self.buttons[key] = button
+            category_grid.addWidget(button, index // 2, index % 2)
+        layout.addLayout(category_grid)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setObjectName("editorResourceDivider")
+        layout.addWidget(divider)
+
+        self.section_title = QLabel("Mídia do projeto")
+        self.section_title.setObjectName("editorResourceTitle")
+        layout.addWidget(self.section_title)
+
+        self.assets_scroll = QScrollArea()
+        self.assets_scroll.setWidgetResizable(True)
+        self.assets_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.assets_scroll.setObjectName("editorAssetsScroll")
+        self.assets_container = QWidget()
+        self.asset_grid = QGridLayout(self.assets_container)
+        self.asset_grid.setContentsMargins(0, 0, 0, 0)
+        self.asset_grid.setHorizontalSpacing(8)
+        self.asset_grid.setVerticalSpacing(8)
+        self.assets_scroll.setWidget(self.assets_container)
+        layout.addWidget(self.assets_scroll, 1)
+
+        self.empty_state = QLabel(
+            "Nenhum recurso no projeto.\n\nUse Importar para adicionar vídeos, imagens ou áudios."
+        )
+        self.empty_state.setObjectName("editorEmptyState")
+        self.empty_state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_state.setWordWrap(True)
+        self.asset_grid.addWidget(self.empty_state, 0, 0, 1, 2)
+        self._request("media")
+
+    def _request(self, key: str) -> None:
+        self.current_resource = key
+        button = self.buttons.get(key)
+        if button is not None:
+            button.setChecked(True)
+        labels = dict((key, title) for key, title, _ in self._resources)
+        self.section_title.setText(labels.get(key, "Recursos"))
+        self._render_resource_cards(key)
+        self.resource_requested.emit(key)
+
+    def activate(self, key: str) -> None:
+        self._request(key)
+
+    def set_media(self, path: Path | None) -> None:
+        self.current_media = path.resolve() if path else None
+        if self.current_resource == "media":
+            self._render_resource_cards("media")
+
+    def _render_resource_cards(self, resource: str) -> None:
+        while self.asset_grid.count():
+            item = self.asset_grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.empty_state = None
+
+        cards: list[tuple[str, str, str]] = []
+        if resource == "media" and self.current_media:
+            cards.append((self.current_media.name, "MÍDIA ATUAL", self.current_media.suffix.upper() or "ARQUIVO"))
+        elif resource == "audio":
+            cards.append(("Áudio original", "A1 · SOM", "WAVEFORM"))
+            cards.append(("Adicionar música", "A2 · MÚSICA", "IMPORTAR"))
+        elif resource == "text":
+            cards.append(("Texto básico", "T1 · TEXTO", "EDITÁVEL"))
+            cards.append(("Título principal", "T2 · MODELO", "MODELO"))
+        elif resource == "captions":
+            cards.append(("Legenda automática", "T1 · IA", "TRANSCRIÇÃO"))
+        elif resource in {"effects", "transitions", "filters", "stickers", "templates", "ai"}:
+            cards.append(("Biblioteca em expansão", "RECURSO", "PRÓXIMA FASE"))
+
+        if not cards:
+            empty = QLabel("Nenhum recurso disponível nesta categoria.\nUse o botão Importar ou adicione um elemento pela timeline.")
+            empty.setObjectName("editorEmptyState")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setWordWrap(True)
+            self.asset_grid.addWidget(empty, 0, 0, 1, 2)
+            return
+
+        for index, (title, subtitle, badge) in enumerate(cards):
+            card = QFrame()
+            card.setObjectName("editorAssetCard")
+            card.setProperty("searchText", f"{title} {subtitle} {badge}".lower())
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 8, 8, 8)
+            card_layout.setSpacing(3)
+            preview = QLabel(badge)
+            preview.setObjectName("editorAssetPreview")
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview.setMinimumHeight(62)
+            card_layout.addWidget(preview)
+            title_label = QLabel(title)
+            title_label.setObjectName("editorAssetTitle")
+            title_label.setWordWrap(True)
+            card_layout.addWidget(title_label)
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setObjectName("editorAssetMeta")
+            card_layout.addWidget(subtitle_label)
+            self.asset_grid.addWidget(card, index // 2, index % 2)
+
+    def _filter_cards(self, text: str) -> None:
+        query = text.strip().lower()
+        for index in range(self.asset_grid.count()):
+            item = self.asset_grid.itemAt(index)
+            widget = item.widget()
+            if widget is None:
+                continue
+            haystack = str(widget.property("searchText") or "")
+            widget.setVisible(not query or query in haystack)
+
+
 class EditorSectionHeader(QFrame):
     """Small header used to give the workspace a clear professional hierarchy."""
 
@@ -109,5 +307,4 @@ class EditorSectionHeader(QFrame):
             layout.addWidget(subtitle_label)
 
 
-__all__ = ["EditorToolRail", "EditorSectionHeader"]
-
+__all__ = ["EditorToolRail", "EditorResourcePanel", "EditorSectionHeader"]

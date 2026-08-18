@@ -33,7 +33,7 @@ from cortaflow.ui.widgets.timeline import TimelineWidget
 from cortaflow.ui.widgets.reframe_overlay import ReframeOverlay
 from cortaflow.ui.widgets.properties_panel import PropertiesPanel
 from cortaflow.ui.widgets.layer_overlay import LayerOverlay
-from cortaflow.ui.widgets.editor_chrome import EditorSectionHeader, EditorToolRail
+from cortaflow.ui.widgets.editor_chrome import EditorResourcePanel, EditorSectionHeader
 from cortaflow.workers.base_worker import FunctionWorker
 
 
@@ -70,6 +70,7 @@ class EditorPage(QWidget):
     layers_changed = Signal(object)
     sequence_changed = Signal(object)
     sequence_export_requested = Signal()
+    media_import_requested = Signal()
     settings_changed = Signal(object)
     reframe_keyframes_changed = Signal(object)
     def __init__(self) -> None:
@@ -98,12 +99,13 @@ class EditorPage(QWidget):
         self.audio.setVolume(0.8)
 
         root_layout = QHBoxLayout(self)
-        root_layout.setContentsMargins(10, 10, 10, 10)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(8, 8, 8, 8)
+        root_layout.setSpacing(8)
 
-        self.tool_rail = EditorToolRail()
-        self.tool_rail.tool_requested.connect(self._handle_tool_request)
-        root_layout.addWidget(self.tool_rail)
+        self.resources = EditorResourcePanel()
+        self.resources.resource_requested.connect(self._handle_resource_request)
+        self.resources.import_requested.connect(self.media_import_requested)
+        root_layout.addWidget(self.resources)
 
         editor_body = QWidget()
         editor_body.setObjectName("editorWorkspace")
@@ -165,14 +167,14 @@ class EditorPage(QWidget):
         layout.addWidget(transport_header)
 
         controls = QHBoxLayout()
-        self.previous_frame_button = self._control_button("◀ quadro", self._previous_frame)
+        self.previous_frame_button = self._control_button("◀ Quadro", self._previous_frame)
         self.back_button = self._control_button("−5 s", lambda: self._jump(-5000))
         controls.addWidget(self.previous_frame_button)
         controls.addWidget(self.back_button)
         self.play_button = self._control_button("Reproduzir", self.toggle_playback)
         controls.addWidget(self.play_button)
         self.forward_button = self._control_button("+5 s", lambda: self._jump(5000))
-        self.next_frame_button = self._control_button("quadro ▶", self._next_frame)
+        self.next_frame_button = self._control_button("Quadro ▶", self._next_frame)
         controls.addWidget(self.forward_button)
         controls.addWidget(self.next_frame_button)
         self.time_label = QLabel("00:00:00 / 00:00:00")
@@ -200,14 +202,14 @@ class EditorPage(QWidget):
         layout.addLayout(controls)
 
         marker_row = QHBoxLayout()
-        self.mark_in_button = self._control_button("Marcar entrada (I)", self.mark_in)
-        self.mark_out_button = self._control_button("Marcar saída (O)", self.mark_out)
-        self.export_button = self._control_button("Exportar sequência", self.export_selection)
+        self.mark_in_button = self._control_button("Entrada (I)", self.mark_in)
+        self.mark_out_button = self._control_button("Saída (O)", self.mark_out)
+        self.export_button = self._control_button("Exportar", self.export_selection)
         self.add_text_button = self._control_button("+ Texto", self.add_text_layer)
         self.add_image_button = self._control_button("+ Imagem", self.add_image_layer)
-        self.delete_layer_button = self._control_button("Excluir camada", self.delete_selected_layer)
+        self.delete_layer_button = self._control_button("Excluir", self.delete_selected_layer)
         self.delete_layer_button.setEnabled(False)
-        self.cancel_export_button = self._control_button("Cancelar exportação", self.cancel_export)
+        self.cancel_export_button = self._control_button("Cancelar", self.cancel_export)
         self.cancel_export_button.setEnabled(False)
         marker_row.addWidget(self.mark_in_button)
         marker_row.addWidget(self.mark_out_button)
@@ -295,26 +297,28 @@ class EditorPage(QWidget):
         self.player.setAudioOutput(None)
         super().closeEvent(event)
 
-    def _handle_tool_request(self, tool: str) -> None:
-        """Route the visual tool rail to the current editor capabilities."""
-        self.tool_rail.activate(tool)
+    def _handle_resource_request(self, resource: str) -> None:
+        """Route the professional resource browser to current editor capabilities."""
         handlers = {
             "text": self.add_text_layer,
             "image": self.add_image_layer,
         }
-        handler = handlers.get(tool)
+        handler = handlers.get(resource)
         if handler is not None:
             handler()
             return
         messages = {
-            "media": "Biblioteca de mídia: importe vídeos e imagens pelo fluxo Importar.",
-            "audio": "Áudio selecionado: use a aba Áudio do inspector para volume e normalização.",
-            "captions": "Legendas selecionadas: use a aba Legenda ou a página Legendas para editar o texto.",
-            "effects": "Efeitos serão aplicados à camada selecionada na próxima etapa do editor.",
-            "transitions": "Transições serão configuradas na aba Corte e na biblioteca de transições.",
-            "ai": "Ferramentas IA: use Gerar cortes sugeridos para análise automática da mídia.",
+            "media": "Biblioteca de mídia selecionada. Use Importar para adicionar arquivos ao projeto.",
+            "audio": "Áudio selecionado: adicione música ou ajuste o áudio original no inspector.",
+            "captions": "Legendas selecionadas: transcreva ou revise o texto na página Legendas.",
+            "effects": "Efeitos selecionados: escolha uma categoria e aplique o efeito à camada na próxima etapa.",
+            "transitions": "Transições selecionadas: arraste uma transição entre dois clipes na timeline.",
+            "filters": "Filtros selecionados: os ajustes serão aplicados ao clipe selecionado.",
+            "stickers": "Stickers selecionados: a biblioteca de elementos será integrada à sequência.",
+            "templates": "Modelos selecionados: escolha um preset para iniciar uma sequência.",
+            "ai": "IA selecionada: use Gerar cortes sugeridos para análise automática da mídia.",
         }
-        self.status_label.setText(messages.get(tool, "Ferramenta selecionada."))
+        self.status_label.setText(messages.get(resource, "Recurso selecionado."))
 
     def _properties_changed(self, settings: object) -> None:
         reframe, subtitle, audio, export = settings
@@ -357,6 +361,7 @@ class EditorPage(QWidget):
         height: int | None = None,
     ) -> None:
         self.source_path = path.resolve()
+        self.resources.set_media(self.source_path)
         self.in_ms = 0
         self.out_ms = None
         self.fps = fps if fps and fps > 0 else 25.0

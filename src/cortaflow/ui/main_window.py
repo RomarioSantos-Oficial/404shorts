@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self.history_page = HistoryPage()
         self.pages.addWidget(self.history_page)
         self.import_page.media_selected.connect(self._open_imported_media)
+        self.editor_page.media_import_requested.connect(self.import_page.choose_local_file)
         self.subtitles_page.transcript_changed.connect(self._transcript_changed)
         self.analysis_page.analysis_finished.connect(self._analysis_finished)
         self.analysis_page.selection_settings_changed.connect(self._selection_settings_changed)
@@ -865,6 +866,26 @@ class MainWindow(QMainWindow):
             #editorWorkspace { background: #101218; }
             #editorHeader, #previewHeader, #transportHeader, #timelineHeader,
             #inspectorHeader { background: #1b1e27; border: 1px solid #292f3b; border-radius: 8px; }
+            #editorResourcePanel { background: #1a1d24; border: 1px solid #2b313d; border-radius: 8px; }
+            #editorResourceBrand { color: #f3f5fb; font-size: 16px; font-weight: 800; }
+            #editorResourceLabel { color: #7f899c; font-size: 10px; font-weight: 800; letter-spacing: 1px; }
+            #editorSourceCombo { min-width: 92px; padding: 4px 6px; }
+            #editorImportButton { background: #5b50d6; border-color: #7168e9; font-weight: 700; padding: 7px 10px; }
+            #editorImportButton:hover { background: #7168e9; }
+            #editorResourceSearch { background: #222630; border-color: #343b49; padding: 7px 9px; }
+            #editorResourceButton { background: #222630; border: 1px solid #303746; border-radius: 5px; color: #aeb7c7; padding: 5px 4px; }
+            #editorResourceButton:hover { background: #2e3544; color: #ffffff; border-color: #4a556c; }
+            #editorResourceButton:checked { background: #4e43b2; color: #ffffff; border-color: #7168e9; }
+            #editorResourceDivider { color: #2f3644; }
+            #editorResourceTitle { color: #eef1f7; font-size: 13px; font-weight: 700; }
+            #editorAssetsScroll { background: transparent; }
+            #editorAssetCard { background: #222630; border: 1px solid #303746; border-radius: 7px; }
+            #editorAssetCard:hover { border-color: #7168e9; background: #292e3b; }
+            #editorAssetPreview { background: #151820; border-radius: 4px; color: #8076dc; font-size: 10px; font-weight: 800; }
+            #editorAssetTitle { color: #eef1f7; font-size: 11px; }
+            #editorAssetMeta { color: #7f899c; font-size: 9px; }
+            #editorEmptyState { color: #7f899c; font-size: 11px; padding: 16px; }
+
             #editorHeader { min-height: 52px; }
             #editorHeader QLabel, #previewHeader QLabel, #transportHeader QLabel,
             #timelineHeader QLabel, #inspectorHeader QLabel { color: #aeb7c7; }
@@ -888,8 +909,10 @@ class MainWindow(QMainWindow):
             #editorToolButton:checked { background: #4e43b2; border-color: #7168e9; color: #ffffff; }
             #editorAiButton { color: #b8a9ff; border-color: #3f376f; }
             QTabWidget::pane { border: 1px solid #2d3442; border-radius: 6px; top: -1px; }
-            QTabBar::tab { background: #1e222c; color: #929bad; padding: 8px 10px; margin-right: 2px; }
+            QTabBar::tab { background: #1e222c; color: #929bad; padding: 7px 7px; margin-right: 1px; font-size: 10px; }
             QTabBar::tab:selected { background: #4e43b2; color: #ffffff; }
+            #editorInspector QTabBar::scroller { width: 18px; }
+            #editorInspector QTabBar::tear { width: 0px; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #202530; border: 1px solid #363e4d;
                 border-radius: 5px; padding: 5px 7px; color: #eef1f7; }
             QSlider::groove:horizontal { height: 4px; background: #343b49; border-radius: 2px; }

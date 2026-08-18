@@ -40,7 +40,7 @@ def test_every_button_in_the_automatic_review_flow_is_connected(qtbot) -> None:
         for button in flow_buttons
     )
     button_texts = {button.text() for button in flow_buttons}
-    assert {"Exportar sequência", "+ Texto", "+ Imagem", "Cancelar exportação"}.issubset(button_texts)
+    assert {"Exportar", "+ Texto", "+ Imagem", "Cancelar"}.issubset(button_texts)
 
 
 def test_automatic_toolbar_buttons_start_and_request_cancellation(
