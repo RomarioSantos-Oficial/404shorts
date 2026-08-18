@@ -33,6 +33,7 @@ from cortaflow.services.project_service import (
     save_project,
 )
 from cortaflow.services.editor_operations import create_initial_clips
+from cortaflow.services.sequence_operations import create_sequence_from_suggestion
 from cortaflow.services.automatic_pipeline import create_automatic_cuts
 from cortaflow.services.face_detection import find_local_face_landmarker
 from cortaflow.services.transcription import (
@@ -187,6 +188,9 @@ class MainWindow(QMainWindow):
         self.suggestions_page.review_requested.connect(self._review_suggestion)
         self.suggestions_page.export_requested.connect(self._prepare_accepted_exports)
         self.editor_page.timeline_changed.connect(self._timeline_changed)
+        self.editor_page.layers_changed.connect(self._layers_changed)
+        self.editor_page.sequence_changed.connect(self._sequence_changed)
+        self.editor_page.sequence_export_requested.connect(self._export_editor_sequence)
         self.editor_page.settings_changed.connect(self._editor_settings_changed)
         self.editor_page.reframe_keyframes_changed.connect(self._editor_reframe_changed)
         self.export_page.settings_changed.connect(self._export_settings_changed)
@@ -219,6 +223,9 @@ class MainWindow(QMainWindow):
                 round(metadata.duration_seconds * 1000),
                 metadata.title,
             )
+            self.project.layers = []
+            self.project.sequences = []
+            self.project.active_sequence_id = None
             self.editor_page.load_media(
                 metadata.local_path,
                 metadata.fps,
@@ -448,8 +455,16 @@ class MainWindow(QMainWindow):
         self._sync_export_context()
 
     def _prepare_accepted_exports(self) -> None:
+        self.export_page.sequence_export_mode = False
         self._sync_export_context()
         if self.export_page.prepare_accepted():
+            self.navigation.setCurrentRow(2)
+            self.suggestions_page.show_review()
+
+    def _export_editor_sequence(self) -> None:
+        """Send the current non-destructive sequence to preview/export review."""
+        self._sync_export_context()
+        if self.export_page.prepare_sequence_export():
             self.navigation.setCurrentRow(2)
             self.suggestions_page.show_review()
 
@@ -465,8 +480,24 @@ class MainWindow(QMainWindow):
         self._prepare_accepted_exports()
 
     def _open_suggestion(self, suggestion) -> None:
-        self.editor_page.set_selection(suggestion.start_ms, suggestion.end_ms)
+        """Open a suggestion as an editable, non-destructive sequence draft."""
+        try:
+            sequence = create_sequence_from_suggestion(suggestion)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Sugestão inválida", str(exc))
+            return
+        self.project.sequences = [item for item in self.project.sequences if item.sequence_id != sequence.sequence_id]
+        self.project.sequences.append(sequence)
+        self.project.active_sequence_id = sequence.sequence_id
+        self.project.timeline_clips = list(sequence.clips)
+        self.project.layers = list(sequence.layers)
+        self._sync_editor_state()
+        self.editor_page.set_selection(0, sequence.duration_ms)
         self.navigation.setCurrentRow(3)
+        self.statusBar().showMessage(
+            "Sugestão aberta como rascunho editável. Arraste as alças, divida, adicione texto ou imagem e exporte quando terminar.",
+            10_000,
+        )
 
     def _review_suggestion(self, suggestion) -> None:
         self._sync_export_context()
@@ -555,8 +586,40 @@ class MainWindow(QMainWindow):
         self._sync_export_context()
 
     def _timeline_changed(self, clips) -> None:
-        self.project.timeline_clips = clips
+        self.project.timeline_clips = list(clips)
+        self._sync_active_sequence(clips=list(clips))
         self._sync_export_context()
+
+    def _layers_changed(self, layers) -> None:
+        self.project.layers = list(layers)
+        self._sync_active_sequence(layers=list(layers))
+        self._sync_export_context()
+
+    def _sequence_changed(self, sequence) -> None:
+        self.project.sequences = [
+            sequence if item.sequence_id == sequence.sequence_id else item
+            for item in self.project.sequences
+        ] or [sequence]
+        self.project.active_sequence_id = sequence.sequence_id
+
+    def _sync_active_sequence(self, *, clips=None, layers=None) -> None:
+        if not self.project.active_sequence_id:
+            return
+        updated = []
+        for sequence in self.project.sequences:
+            if sequence.sequence_id != self.project.active_sequence_id:
+                updated.append(sequence)
+                continue
+            updated.append(
+                sequence.model_copy(
+                    update={
+                        "clips": list(clips) if clips is not None else sequence.clips,
+                        "layers": list(layers) if layers is not None else sequence.layers,
+                        "dirty": True,
+                    }
+                )
+            )
+        self.project.sequences = updated
 
     def _editor_settings_changed(self, settings) -> None:
         reframe, subtitle, audio, export = settings
@@ -586,9 +649,17 @@ class MainWindow(QMainWindow):
             self.project.subtitle_style,
             self.project.audio_settings,
             self.project.export,
+            self.project.layers,
+            self._active_sequence(),
         )
         self.subtitles_page.set_style(self.project.subtitle_style)
         self._sync_export_context()
+
+    def _active_sequence(self):
+        return next(
+            (item for item in self.project.sequences if item.sequence_id == self.project.active_sequence_id),
+            None,
+        )
 
     def _sync_export_context(self) -> None:
         duration_ms = round(float(self.project.source_metadata.get("duration_seconds", 0)) * 1000)
@@ -609,6 +680,7 @@ class MainWindow(QMainWindow):
             self.project.reframe_settings,
             self.project.audio_settings,
             (width, height) if width and height else None,
+            self.project.layers,
         )
 
     def _merge_manual_keyframes(self, automatic) -> list:

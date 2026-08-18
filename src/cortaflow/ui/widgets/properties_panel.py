@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cortaflow.domain.editing import AudioSettings, ReframeSettings, SubtitleStyle, TimelineClip
+from cortaflow.domain.editing import AudioSettings, LayerItem, ReframeSettings, SubtitleStyle, TimelineClip
 from cortaflow.domain.project import ExportSettings, WatermarkSettings
 
 
@@ -23,6 +23,7 @@ class PropertiesPanel(QWidget):
     settings_changed = Signal(object)
     clip_update_requested = Signal(object)
     manual_keyframe_requested = Signal()
+    layer_update_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -30,11 +31,13 @@ class PropertiesPanel(QWidget):
         self.setMaximumWidth(360)
         self._loading = False
         self.selected_clip: TimelineClip | None = None
+        self.selected_layer: LayerItem | None = None
         self.watermark_settings = WatermarkSettings()
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
         self._create_clip_tab()
+        self._create_layer_tab()
         self._create_reframe_tab()
         self._create_face_tab()
         self._create_subtitle_tab()
@@ -63,6 +66,33 @@ class PropertiesPanel(QWidget):
         form.addRow("Transição (ms)", self.clip_transition)
         form.addRow(apply_button)
         self.tabs.addTab(page, "Corte")
+
+    def _create_layer_tab(self) -> None:
+        page, form = self._form_page()
+        self.layer_label = QLabel("Nenhuma camada selecionada")
+        self.layer_text = QLineEdit()
+        self.layer_font = QLineEdit("Arial")
+        self.layer_font_size = self._spin(8, 240)
+        self.layer_x = self._double(0, 100, 1)
+        self.layer_y = self._double(0, 100, 1)
+        self.layer_width = self._double(1, 100, 1)
+        self.layer_height = self._double(1, 100, 1)
+        self.layer_opacity = self._double(0, 1, 0.05)
+        self.layer_visible = QCheckBox("Camada visível")
+        apply_button = QPushButton("Aplicar à camada")
+        apply_button.clicked.connect(self._emit_layer_update)
+        form.addRow(self.layer_label)
+        form.addRow("Texto", self.layer_text)
+        form.addRow("Fonte", self.layer_font)
+        form.addRow("Tamanho", self.layer_font_size)
+        form.addRow("Posição X (%)", self.layer_x)
+        form.addRow("Posição Y (%)", self.layer_y)
+        form.addRow("Largura (%)", self.layer_width)
+        form.addRow("Altura (%)", self.layer_height)
+        form.addRow("Opacidade", self.layer_opacity)
+        form.addRow(self.layer_visible)
+        form.addRow(apply_button)
+        self.tabs.addTab(page, "Camada")
 
     def _create_reframe_tab(self) -> None:
         page, form = self._form_page()
@@ -212,6 +242,43 @@ class PropertiesPanel(QWidget):
         self.clip_source_start.setValue(clip.source_start_ms)
         self.clip_source_end.setValue(clip.source_end_ms)
         self.clip_transition.setValue(clip.transition_ms)
+
+    def set_selected_layer(self, layer: LayerItem | None) -> None:
+        self.selected_layer = layer
+        self._loading = True
+        if layer is None:
+            self.layer_label.setText("Nenhuma camada selecionada")
+            self.layer_text.clear()
+        else:
+            self.layer_label.setText(f"{layer.kind.title()} · {layer.item_id}")
+            self.layer_text.setText(layer.text)
+            self.layer_font.setText(layer.font_name)
+            self.layer_font_size.setValue(layer.font_size)
+            self.layer_x.setValue(layer.x_percent)
+            self.layer_y.setValue(layer.y_percent)
+            self.layer_width.setValue(layer.width_percent)
+            self.layer_height.setValue(layer.height_percent)
+            self.layer_opacity.setValue(layer.opacity)
+            self.layer_visible.setChecked(layer.visible)
+        self._loading = False
+
+    def _emit_layer_update(self) -> None:
+        if self._loading or self.selected_layer is None:
+            return
+        self.layer_update_requested.emit(
+            {
+                "item_id": self.selected_layer.item_id,
+                "text": self.layer_text.text(),
+                "font_name": self.layer_font.text().strip() or "Arial",
+                "font_size": self.layer_font_size.value(),
+                "x_percent": self.layer_x.value(),
+                "y_percent": self.layer_y.value(),
+                "width_percent": self.layer_width.value(),
+                "height_percent": self.layer_height.value(),
+                "opacity": self.layer_opacity.value(),
+                "visible": self.layer_visible.isChecked(),
+            }
+        )
 
     def set_watermark_settings(self, watermark: WatermarkSettings) -> None:
         """Keep watermark state when export settings are edited from either page."""

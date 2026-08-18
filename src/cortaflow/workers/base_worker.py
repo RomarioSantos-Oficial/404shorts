@@ -13,10 +13,11 @@ class WorkerSignals(QObject):
 
 
 class FunctionWorker(QRunnable):
-    def __init__(self, function: Callable[..., Any], *args: Any) -> None:
+    def __init__(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         super().__init__()
         self.function = function
         self.args = args
+        self.kwargs = kwargs
         self.cancel_event = Event()
         self.signals = WorkerSignals()
 
@@ -26,7 +27,12 @@ class FunctionWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            result = self.function(*self.args, self.signals.progress.emit, self.cancel_event)
+            result = self.function(
+                *self.args,
+                self.signals.progress.emit,
+                self.cancel_event,
+                **self.kwargs,
+            )
         except Exception as exc:
             self.signals.failed.emit(str(exc))
         else:

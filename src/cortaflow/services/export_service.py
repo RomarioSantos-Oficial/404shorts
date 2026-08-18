@@ -7,7 +7,7 @@ from threading import Event
 from typing import Any
 
 from cortaflow.domain.clip import ClipRange
-from cortaflow.domain.editing import AudioSettings, ReframeSettings, SubtitleStyle, TimelineClip
+from cortaflow.domain.editing import AudioSettings, LayerItem, ReframeSettings, SubtitleStyle, TimelineClip
 from cortaflow.domain.project import ExportSettings, ReframeKeyframe
 from cortaflow.domain.subtitle import SubtitleCue, TranscriptWord
 from cortaflow.infrastructure.ffmpeg import run_ffprobe_json
@@ -31,6 +31,7 @@ def render_project_export(
     timeline_clips: list[TimelineClip] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
     cancelled: Event | None = None,
+    layers: list[LayerItem] | None = None,
 ) -> Path:
     """Render with temporary ASS assets that are always cleaned up."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +104,7 @@ def render_project_export(
                 source_has_audio=source_has_audio,
                 progress=progress,
                 cancelled=cancelled,
+                layers=layers,
             )
         return render(
             source,

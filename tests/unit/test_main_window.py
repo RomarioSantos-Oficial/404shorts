@@ -32,11 +32,15 @@ def test_every_button_in_the_automatic_review_flow_is_connected(qtbot) -> None:
     ]
     flow_buttons = [button for page in flow_pages for button in page.findChildren(QPushButton)]
 
-    assert len(flow_buttons) == 53
+    # O editor não destrutivo adiciona comandos ao fluxo; evite acoplar o teste
+    # a uma contagem fixa quando novos controles forem incluídos.
+    assert len(flow_buttons) >= 53
     assert all(
         button.receivers("2clicked()") >= 1 or button.receivers("2toggled(bool)") >= 1
         for button in flow_buttons
     )
+    button_texts = {button.text() for button in flow_buttons}
+    assert {"Exportar sequência", "+ Texto", "+ Imagem", "Cancelar exportação"}.issubset(button_texts)
 
 
 def test_automatic_toolbar_buttons_start_and_request_cancellation(
@@ -130,8 +134,8 @@ def test_selected_suggestion_opens_embedded_editor_with_exact_range(qtbot, tmp_p
     assert window.export_page.start_seconds.value() == 2.5
     assert window.export_page.end_seconds.value() == 8.75
     assert not window.export_page.timeline_mode.isChecked()
-    assert not window.export_page.start_seconds.isEnabled()
-    assert not window.export_page.end_seconds.isEnabled()
+    assert window.export_page.start_seconds.isEnabled()
+    assert window.export_page.end_seconds.isEnabled()
 
 
 def test_toolbar_saves_the_cut_open_in_individual_review_without_batch_acceptance(

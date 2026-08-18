@@ -23,11 +23,11 @@ def test_properties_emit_valid_persistent_settings(qtbot) -> None:
     assert export.codec == "h264"
 
 
-def test_panel_has_all_six_property_tabs(qtbot) -> None:
+def test_panel_has_all_property_tabs(qtbot) -> None:
     panel = PropertiesPanel()
     qtbot.addWidget(panel)
     assert [panel.tabs.tabText(index) for index in range(panel.tabs.count())] == [
-        "Corte", "Enquadramento", "Rosto", "Legenda", "Áudio", "Exportação"
+        "Corte", "Camada", "Enquadramento", "Rosto", "Legenda", "Áudio", "Exportação"
     ]
 
 

@@ -47,7 +47,7 @@ def test_source_inside_project_folder_is_saved_as_relative_path(tmp_path: Path) 
     save_project(ProjectDocument(source_path=source), path)
 
     raw_payload = path.read_text(encoding="utf-8")
-    assert '"source_path": "mídia\\\\vídeo fonte.mp4"' in raw_payload
+    assert '"source_path": "mídia/vídeo fonte.mp4"' in raw_payload
     assert load_project(path).source_path == source.resolve()
 
 
@@ -65,7 +65,7 @@ def test_watermark_inside_project_folder_is_portable(tmp_path: Path) -> None:
 
     save_project(project, path)
 
-    assert '"image_path": "marca\\\\logo.png"' in path.read_text(encoding="utf-8")
+    assert '"image_path": "marca/logo.png"' in path.read_text(encoding="utf-8")
     assert load_project(path).export.watermark.image_path == watermark.resolve()
 
 

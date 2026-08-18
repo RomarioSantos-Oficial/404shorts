@@ -8,6 +8,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox,
+    QInputDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -21,14 +22,16 @@ from PySide6.QtWidgets import (
 )
 
 from cortaflow.domain.clip import ClipRange, format_timestamp
-from cortaflow.domain.editing import TimelineClip
+from cortaflow.domain.editing import LayerItem, SequenceDocument, TimelineClip
 from cortaflow.domain.project import ReframeKeyframe
 from cortaflow.domain.tracking import CropFrame
 from cortaflow.services.editor_operations import delete_clip, move_clip, set_transition, split_at, trim_clip
+from cortaflow.services.sequence_operations import create_image_layer, create_text_layer, update_layer
 from cortaflow.services.transcoder import export_clip
 from cortaflow.ui.widgets.timeline import TimelineWidget
 from cortaflow.ui.widgets.reframe_overlay import ReframeOverlay
 from cortaflow.ui.widgets.properties_panel import PropertiesPanel
+from cortaflow.ui.widgets.layer_overlay import LayerOverlay
 from cortaflow.workers.base_worker import FunctionWorker
 
 
@@ -46,8 +49,25 @@ class TimelineStateCommand(QUndoCommand):
         self.page._apply_timeline_clips(self.after)
 
 
+class LayerStateCommand(QUndoCommand):
+    def __init__(self, page: "EditorPage", before: list[LayerItem], after: list[LayerItem], text: str) -> None:
+        super().__init__(text)
+        self.page = page
+        self.before = list(before)
+        self.after = list(after)
+
+    def undo(self) -> None:
+        self.page._apply_layers(self.before)
+
+    def redo(self) -> None:
+        self.page._apply_layers(self.after)
+
+
 class EditorPage(QWidget):
     timeline_changed = Signal(object)
+    layers_changed = Signal(object)
+    sequence_changed = Signal(object)
+    sequence_export_requested = Signal()
     settings_changed = Signal(object)
     reframe_keyframes_changed = Signal(object)
     def __init__(self) -> None:
@@ -59,7 +79,10 @@ class EditorPage(QWidget):
         self.source_width = 0
         self.source_height = 0
         self.timeline_clips: list[TimelineClip] = []
+        self.layers: list[LayerItem] = []
+        self.sequence: SequenceDocument | None = None
         self.selected_clip_id: str | None = None
+        self.selected_layer_id: str | None = None
         self.reframe_keyframes: list[ReframeKeyframe] = []
         self.undo_stack = QUndoStack(self)
         self.export_worker: FunctionWorker | None = None
@@ -82,6 +105,10 @@ class EditorPage(QWidget):
         video_stack.addWidget(self.video)
         self.reframe_overlay = ReframeOverlay()
         video_stack.addWidget(self.reframe_overlay)
+        self.layer_overlay = LayerOverlay()
+        self.layer_overlay.layer_selected.connect(self._select_layer)
+        self.layer_overlay.layer_moved.connect(self._move_layer)
+        video_stack.addWidget(self.layer_overlay)
         layout.addWidget(self.video_container, 1)
         controls = QHBoxLayout()
         self.previous_frame_button = self._control_button("◀ quadro", self._previous_frame)
@@ -121,12 +148,16 @@ class EditorPage(QWidget):
         marker_row = QHBoxLayout()
         self.mark_in_button = self._control_button("Marcar entrada (I)", self.mark_in)
         self.mark_out_button = self._control_button("Marcar saída (O)", self.mark_out)
-        self.export_button = self._control_button("Exportar corte", self.export_selection)
+        self.export_button = self._control_button("Exportar sequência", self.export_selection)
+        self.add_text_button = self._control_button("+ Texto", self.add_text_layer)
+        self.add_image_button = self._control_button("+ Imagem", self.add_image_layer)
         self.cancel_export_button = self._control_button("Cancelar exportação", self.cancel_export)
         self.cancel_export_button.setEnabled(False)
         marker_row.addWidget(self.mark_in_button)
         marker_row.addWidget(self.mark_out_button)
         marker_row.addWidget(self.export_button)
+        marker_row.addWidget(self.add_text_button)
+        marker_row.addWidget(self.add_image_button)
         marker_row.addWidget(self.cancel_export_button)
         marker_row.addStretch()
         layout.addLayout(marker_row)
@@ -141,23 +172,27 @@ class EditorPage(QWidget):
         self.timeline.seek_requested.connect(self.player.setPosition)
         self.timeline.clip_selected.connect(self._select_clip)
         self.timeline.clip_move_requested.connect(self.move_selected_clip)
+        self.timeline.clip_trim_requested.connect(self.trim_selected_clip)
         layout.addWidget(self.timeline)
 
         self.properties = PropertiesPanel()
         self.properties.settings_changed.connect(self._properties_changed)
         self.properties.clip_update_requested.connect(self._update_clip_properties)
         self.properties.manual_keyframe_requested.connect(self.add_manual_keyframe)
+        self.properties.layer_update_requested.connect(self._update_layer_properties)
         root_layout.addWidget(self.properties)
 
         self.player.durationChanged.connect(self.timeline.set_duration)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.positionChanged.connect(self._position_changed)
+        self.player.positionChanged.connect(self.layer_overlay.set_position)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
         self.player.errorOccurred.connect(self._playback_error)
         self.video.fullScreenChanged.connect(
             lambda active: self.fullscreen_button.setText("Sair da tela cheia" if active else "Tela cheia")
         )
         self._create_shortcuts()
+        self.layer_overlay.raise_()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt virtual method
         """Release native multimedia objects before their video widget disappears."""
@@ -255,11 +290,18 @@ class EditorPage(QWidget):
         subtitle_style,
         audio_settings,
         export_settings,
+        layers=None,
+        sequence=None,
     ) -> None:
         self.timeline_clips = list(timeline_clips)
+        self.layers = list(layers or [])
+        self.sequence = sequence
         self.reframe_keyframes = list(reframe_keyframes)
         cues = transcript.cues if transcript else []
         words = transcript.words if transcript else []
+        self.layer_overlay.set_layers(self.layers)
+        self.layer_overlay.set_duration(max((item.timeline_end_ms for item in self.timeline_clips), default=1))
+        self.properties.set_selected_layer(None)
         self.timeline.set_track_data(
             self.timeline_clips,
             transcript=words,
@@ -305,6 +347,35 @@ class EditorPage(QWidget):
         if updated != self.timeline_clips:
             self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Mover clipe"))
 
+    def trim_selected_clip(self, clip_id: str, side: str, position_ms: int) -> None:
+        target = next((clip for clip in self.timeline_clips if clip.clip_id == clip_id), None)
+        if target is None:
+            return
+        group = [
+            clip for clip in self.timeline_clips
+            if clip.track in {"video", "audio"}
+            and clip.timeline_start_ms == target.timeline_start_ms
+            and clip.timeline_end_ms == target.timeline_end_ms
+        ] or [target]
+        updated = list(self.timeline_clips)
+        try:
+            for clip in group:
+                if side == "left":
+                    source_start = clip.source_start_ms + (position_ms - clip.timeline_start_ms)
+                    if source_start >= clip.source_end_ms - 250:
+                        raise ValueError("O clipe precisa manter pelo menos 250 ms.")
+                    updated = trim_clip(updated, clip.clip_id, source_start, clip.source_end_ms)
+                else:
+                    source_end = clip.source_start_ms + (position_ms - clip.timeline_start_ms)
+                    if source_end <= clip.source_start_ms + 250:
+                        raise ValueError("O clipe precisa manter pelo menos 250 ms.")
+                    updated = trim_clip(updated, clip.clip_id, clip.source_start_ms, source_end)
+        except (ValueError, TypeError) as exc:
+            self.status_label.setText(str(exc))
+            return
+        if updated != self.timeline_clips:
+            self.undo_stack.push(TimelineStateCommand(self, self.timeline_clips, updated, "Ajustar duração"))
+
     def _update_clip_properties(self, payload: dict) -> None:
         try:
             updated = move_clip(self.timeline_clips, payload["clip_id"], payload["timeline_start_ms"])
@@ -337,7 +408,76 @@ class EditorPage(QWidget):
             self.properties.set_selected_clip(
                 next((clip for clip in clips if clip.clip_id == self.selected_clip_id), None)
             )
+        if self.sequence is not None:
+            self.sequence = self.sequence.model_copy(update={"clips": list(clips), "dirty": True})
+            self.sequence_changed.emit(self.sequence)
         self.timeline_changed.emit(list(clips))
+
+    def _apply_layers(self, layers: list[LayerItem]) -> None:
+        self.layers = list(layers)
+        self.layer_overlay.set_layers(self.layers)
+        selected = next((layer for layer in self.layers if layer.item_id == self.selected_layer_id), None)
+        self.properties.set_selected_layer(selected)
+        if self.sequence is not None:
+            self.sequence = self.sequence.model_copy(update={"layers": list(layers), "dirty": True})
+            self.sequence_changed.emit(self.sequence)
+        self.layers_changed.emit(list(layers))
+
+    def add_text_layer(self) -> None:
+        text, accepted = QInputDialog.getText(self, "Adicionar texto", "Texto da camada:")
+        if not accepted:
+            return
+        sequence = self.sequence or SequenceDocument(
+            sequence_id="editor-draft", name="Rascunho", clips=list(self.timeline_clips)
+        )
+        layer = create_text_layer(sequence, text, start_ms=self.player.position())
+        self.sequence = sequence
+        self.selected_layer_id = layer.item_id
+        self._apply_layers(sequence.layers)
+        self._select_layer(layer.item_id)
+
+    def add_image_layer(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Adicionar imagem", "", "Imagens (*.png *.jpg *.jpeg *.webp *.svg)"
+        )
+        if not path:
+            return
+        sequence = self.sequence or SequenceDocument(
+            sequence_id="editor-draft", name="Rascunho", clips=list(self.timeline_clips)
+        )
+        layer = create_image_layer(sequence, path, start_ms=self.player.position())
+        self.sequence = sequence
+        self.selected_layer_id = layer.item_id
+        self._apply_layers(sequence.layers)
+        self._select_layer(layer.item_id)
+
+    def _select_layer(self, item_id: str) -> None:
+        self.selected_layer_id = item_id
+        self.layer_overlay.select_layer(item_id)
+        self.properties.set_selected_layer(next((layer for layer in self.layers if layer.item_id == item_id), None))
+
+    def _move_layer(self, item_id: str, x_percent: float, y_percent: float) -> None:
+        try:
+            updated = update_layer(self.sequence or SequenceDocument(
+                sequence_id="editor-draft", name="Rascunho", clips=list(self.timeline_clips), layers=self.layers
+            ), item_id, x_percent=x_percent, y_percent=y_percent)
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        before = list(self.layers)
+        self.undo_stack.push(LayerStateCommand(self, before, updated.layers, "Mover camada"))
+
+    def _update_layer_properties(self, payload: dict) -> None:
+        try:
+            sequence = self.sequence or SequenceDocument(
+                sequence_id="editor-draft", name="Rascunho", clips=list(self.timeline_clips), layers=self.layers
+            )
+            updated = update_layer(sequence, payload.pop("item_id"), **payload)
+            self.sequence = updated
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Camada inválida", str(exc))
+            return
+        self.undo_stack.push(LayerStateCommand(self, self.layers, updated.layers, "Editar camada"))
 
     def add_manual_keyframe(self) -> None:
         if not self.source_width or not self.source_height:
@@ -426,6 +566,9 @@ class EditorPage(QWidget):
         self.timeline.set_markers(self.in_ms, self.out_ms)
 
     def export_selection(self) -> None:
+        if self.sequence is not None and any(item.track == "video" for item in self.timeline_clips):
+            self.sequence_export_requested.emit()
+            return
         if self.export_worker is not None:
             return
         if not self.source_path or self.out_ms is None:

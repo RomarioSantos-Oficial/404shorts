@@ -1,0 +1,104 @@
+"""Canvas leve para selecionar e posicionar camadas sobre o preview."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
+from PySide6.QtWidgets import QWidget
+
+from cortaflow.domain.editing import LayerItem
+
+
+class LayerOverlay(QWidget):
+    layer_selected = Signal(str)
+    layer_moved = Signal(str, float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setMouseTracking(True)
+        self.layers: list[LayerItem] = []
+        self.position_ms = 0
+        self.duration_ms = 1
+        self.selected_id: str | None = None
+        self._drag_id: str | None = None
+        self._drag_offset = QPointF()
+
+    def set_layers(self, layers: list[LayerItem]) -> None:
+        self.layers = list(layers)
+        self.update()
+
+    def set_position(self, position_ms: int) -> None:
+        self.position_ms = position_ms
+        self.update()
+
+    def set_duration(self, duration_ms: int) -> None:
+        self.duration_ms = max(1, duration_ms)
+        self.update()
+
+    def select_layer(self, item_id: str | None) -> None:
+        self.selected_id = item_id
+        self.update()
+
+    def _visible_layers(self) -> list[LayerItem]:
+        return [
+            layer for layer in self.layers
+            if layer.visible and layer.timeline_start_ms <= self.position_ms < layer.timeline_end_ms
+        ]
+
+    def _rect(self, layer: LayerItem):
+        width = self.width() * layer.width_percent / 100
+        height = self.height() * layer.height_percent / 100
+        left = self.width() * layer.x_percent / 100 - width / 2
+        top = self.height() * layer.y_percent / 100 - height / 2
+        return left, top, width, height
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        point = event.position()
+        for layer in reversed(self._visible_layers()):
+            left, top, width, height = self._rect(layer)
+            if left <= point.x() <= left + width and top <= point.y() <= top + height:
+                self.selected_id = layer.item_id
+                self._drag_id = layer.item_id
+                self._drag_offset = QPointF(point.x() - left, point.y() - top)
+                self.layer_selected.emit(layer.item_id)
+                self.update()
+                return
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if not self._drag_id or not event.buttons() & Qt.MouseButton.LeftButton:
+            return
+        layer = next((item for item in self.layers if item.item_id == self._drag_id), None)
+        if layer is None:
+            return
+        _, _, width, height = self._rect(layer)
+        left = max(0.0, min(self.width() - width, event.position().x() - self._drag_offset.x()))
+        top = max(0.0, min(self.height() - height, event.position().y() - self._drag_offset.y()))
+        x_percent = ((left + width / 2) / max(1, self.width())) * 100
+        y_percent = ((top + height / 2) / max(1, self.height())) * 100
+        self.layer_moved.emit(self._drag_id, x_percent, y_percent)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_id = None
+
+    def paintEvent(self, event: object) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for layer in self._visible_layers():
+            left, top, width, height = self._rect(layer)
+            rect = painter.boundingRect(int(left), int(top), max(1, int(width)), max(1, int(height)), Qt.AlignmentFlag.AlignCenter, layer.text)
+            if layer.kind == "image" and layer.source_path:
+                painter.fillRect(left, top, width, height, QColor(24, 28, 40, 150))
+                label = "IMAGEM"
+            else:
+                painter.fillRect(left, top, width, height, QColor(20, 24, 32, 130 if layer.background else 35))
+                label = layer.text
+            painter.setFont(QFont(layer.font_name, max(8, round(layer.font_size * self.height() / 1080))))
+            painter.setPen(QColor(layer.color))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, label)
+            if layer.item_id == self.selected_id:
+                painter.setPen(QPen(QColor("#55d6a8"), 2, Qt.PenStyle.DashLine))
+                painter.drawRect(left, top, width, height)

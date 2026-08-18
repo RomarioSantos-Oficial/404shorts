@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from cortaflow.config import AppConfig
 from cortaflow.domain.analysis import ClipSuggestion
 from cortaflow.domain.clip import ClipRange, format_timestamp
-from cortaflow.domain.editing import AudioSettings, ReframeSettings, SubtitleStyle, TimelineClip
+from cortaflow.domain.editing import AudioSettings, LayerItem, ReframeSettings, SubtitleStyle, TimelineClip
 from cortaflow.domain.project import ExportSettings, ReframeKeyframe, WatermarkSettings
 from cortaflow.domain.subtitle import SubtitleCue, TranscriptWord
 from cortaflow.infrastructure.database import enqueue_task, initialize_database, update_task_status
@@ -90,6 +90,7 @@ class ExportPage(QWidget):
         self.subtitle_style = SubtitleStyle()
         self.keyframes: list[ReframeKeyframe] = []
         self.timeline_clips: list[TimelineClip] = []
+        self.layers: list[LayerItem] = []
         self.reframe_settings = ReframeSettings()
         self.audio_settings = AudioSettings()
         self.source_size: tuple[int, int] | None = None
@@ -103,6 +104,7 @@ class ExportPage(QWidget):
         self.preview_approved = False
         self.review_suggestion: ClipSuggestion | None = None
         self.review_reference_preview: Path | None = None
+        self.sequence_export_mode = False
         self.review_cue_indexes: list[int] = []
         self._editing_cues = False
         self.review_start_ms = 0
@@ -307,6 +309,7 @@ class ExportPage(QWidget):
         reframe_settings: ReframeSettings | None = None,
         audio_settings: AudioSettings | None = None,
         source_size: tuple[int, int] | None = None,
+        layers: list[LayerItem] | None = None,
     ) -> None:
         resolved_source = source_path.resolve() if source_path else None
         if resolved_source != self.source_path:
@@ -330,6 +333,7 @@ class ExportPage(QWidget):
                 self.review_suggestion,
             )
         self.timeline_clips = list(timeline_clips or [])
+        self.layers = list(layers or [])
         self.reframe_settings = reframe_settings or ReframeSettings()
         self.audio_settings = audio_settings or AudioSettings()
         self.source_size = source_size
@@ -353,8 +357,9 @@ class ExportPage(QWidget):
         self.timeline_mode.setEnabled(use_video_timeline)
         self.timeline_mode.setChecked(use_video_timeline)
         self.timeline_mode.blockSignals(False)
-        self.start_seconds.setEnabled(not has_video_timeline and self.review_suggestion is None)
-        self.end_seconds.setEnabled(not has_video_timeline and self.review_suggestion is None)
+        editable_review_range = self.review_suggestion is not None or not has_video_timeline
+        self.start_seconds.setEnabled(editable_review_range)
+        self.end_seconds.setEnabled(editable_review_range)
         self._refresh_review_subtitles()
         self._invalidate_preview()
         self.preview_button.setEnabled(self.source_path is not None and self.duration_ms > 0)
@@ -393,6 +398,9 @@ class ExportPage(QWidget):
         )
 
     def approve_preview(self) -> None:
+        if self.sequence_export_mode:
+            self.save_sequence()
+            return
         if self.review_suggestion:
             self.save_current_suggestion()
             return
@@ -402,10 +410,66 @@ class ExportPage(QWidget):
         self.batch_button.setEnabled(any(item.status == "accepted" for item in self.suggestions))
         self.status.setText("Prévia validada. Agora escolha a pasta para salvar os cortes aceitos.")
 
+    def prepare_sequence_export(self) -> bool:
+        """Open the active non-destructive timeline for preview and final save."""
+        if not self.source_path or not self.source_path.is_file():
+            QMessageBox.warning(self, "Mídia ausente", "Importe uma mídia antes de exportar a sequência.")
+            return False
+        if not any(item.track == "video" for item in self.timeline_clips):
+            QMessageBox.warning(self, "Sequência vazia", "A sequência não contém clipes de vídeo.")
+            return False
+        self.sequence_export_mode = True
+        self.review_suggestion = None
+        self.review_reference_preview = None
+        duration_ms = max(item.timeline_end_ms for item in self.timeline_clips)
+        self.timeline_mode.blockSignals(True)
+        self.timeline_mode.setEnabled(True)
+        self.timeline_mode.setChecked(True)
+        self.timeline_mode.blockSignals(False)
+        self.start_seconds.blockSignals(True)
+        self.end_seconds.blockSignals(True)
+        self.start_seconds.setValue(0)
+        self.end_seconds.setValue(duration_ms / 1000)
+        self.start_seconds.blockSignals(False)
+        self.end_seconds.blockSignals(False)
+        self.start_seconds.setEnabled(False)
+        self.end_seconds.setEnabled(False)
+        self.approve_button.setText("Salvar sequência")
+        self.approve_button.setEnabled(False)
+        self.batch_button.setVisible(False)
+        self._refresh_review_subtitles()
+        self._invalidate_preview()
+        self.status.setText("Sequência editada carregada. Gere a prévia para revisar antes de salvar.")
+        return True
+
+    def save_sequence(self) -> bool:
+        """Save the edited timeline, layers and subtitles as one final video."""
+        if not self.sequence_export_mode or not self.source_path:
+            return False
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Salvar sequência editada", "corta-flow-sequencia.mp4", "Vídeo MP4 (*.mp4)"
+        )
+        if not filename:
+            return False
+        destination = self._available_destination(Path(filename))
+        duration_ms = max((item.timeline_end_ms for item in self.timeline_clips), default=0)
+        if duration_ms <= 0:
+            return False
+        queued = self._enqueue_final_job(
+            destination,
+            ClipRange(start_ms=0, end_ms=duration_ms),
+            use_timeline=True,
+        )
+        if queued:
+            self.approve_button.setEnabled(False)
+            self.status.setText(f"Salvando a sequência editada em {destination.name}…")
+        return queued
+
     def save_current_suggestion(self) -> bool:
         """Save the cut open in the individual editor without batch acceptance."""
         if not self.source_path or not self.review_suggestion:
             return False
+        self.sequence_export_mode = False
         folder = QFileDialog.getExistingDirectory(self, "Pasta para salvar este corte")
         if not folder:
             return False
@@ -488,6 +552,7 @@ class ExportPage(QWidget):
                 "A mídia original não está disponível para revisar este corte.",
             )
             return False
+        self.sequence_export_mode = False
         self.review_suggestion = suggestion
         self.review_reference_preview = (
             rendered_preview.resolve()
@@ -501,8 +566,8 @@ class ExportPage(QWidget):
         self.end_seconds.setValue(suggestion.end_ms / 1000)
         self.start_seconds.blockSignals(False)
         self.end_seconds.blockSignals(False)
-        self.start_seconds.setEnabled(False)
-        self.end_seconds.setEnabled(False)
+        self.start_seconds.setEnabled(True)
+        self.end_seconds.setEnabled(True)
         self.approve_button.setText("Salvar este corte")
         self.approve_button.setEnabled(True)
         self.batch_button.setVisible(False)
@@ -513,8 +578,8 @@ class ExportPage(QWidget):
             self._load_review_media(self.review_reference_preview, 0, None, baked=False)
         self.preview_button.setEnabled(True)
         self.status.setText(
-            "Revise enquadramento e legendas, ajuste a marca-d'água e gere a prévia. "
-            "Ao aprovar, escolha a pasta e este corte exato será salvo."
+            "Ajuste início, fim, enquadramento, legendas e marca-d'água. "
+            "Gere a prévia e salve o intervalo revisado."
         )
         return True
 
@@ -656,8 +721,7 @@ class ExportPage(QWidget):
         job = self.queue.popleft()
         job.status = "running"
         self._persist_status(job)
-        worker = FunctionWorker(
-            render_project_export,
+        worker_args = (
             self.source_path,
             job.destination,
             job.settings,
@@ -672,6 +736,12 @@ class ExportPage(QWidget):
             self.source_size,
             list(self.timeline_clips) if job.use_timeline else [],
         )
+        worker_kwargs = (
+            {"layers": list(self.layers)}
+            if job.use_timeline and self.layers
+            else {}
+        )
+        worker = FunctionWorker(render_project_export, *worker_args, **worker_kwargs)
         worker.signals.progress.connect(self._render_progress)
         worker.signals.finished.connect(self._render_finished)
         worker.signals.failed.connect(self._render_failed)
@@ -713,6 +783,8 @@ class ExportPage(QWidget):
             self.preview_path = destination
             self.open_preview_button.setEnabled(True)
             self.approve_button.setEnabled(True)
+            if self.sequence_export_mode:
+                self.approve_button.setText("Salvar sequência")
             self._load_review_media(destination, 0, None, baked=True)
             watermark_note = (
                 " Marca-d'água gravada no MP4."

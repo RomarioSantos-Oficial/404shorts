@@ -25,6 +25,7 @@ class TimelineCanvas(QWidget):
     seek_requested = Signal(int)
     clip_selected = Signal(str)
     clip_move_requested = Signal(str, int)
+    clip_trim_requested = Signal(str, str, int)
     track_left = 104
     ruler_height = 30
     track_height = 34
@@ -41,6 +42,7 @@ class TimelineCanvas(QWidget):
         self.selected_clip_id: str | None = None
         self._drag_clip_id: str | None = None
         self._drag_offset_ms = 0
+        self._trim_side: str | None = None
         self.setMinimumHeight(self.ruler_height + len(TRACKS) * self.track_height + 8)
         self._update_width()
 
@@ -100,8 +102,18 @@ class TimelineCanvas(QWidget):
         clip = self._clip_at(event.position().x(), event.position().y())
         if clip:
             self.selected_clip_id = clip.clip_id
-            self._drag_clip_id = clip.clip_id
-            self._drag_offset_ms = position - clip.timeline_start_ms
+            left_x = self.position_to_x(clip.timeline_start_ms)
+            right_x = self.position_to_x(clip.timeline_end_ms)
+            if abs(event.position().x() - left_x) <= 9:
+                self._trim_side = "left"
+                self._drag_clip_id = clip.clip_id
+            elif abs(event.position().x() - right_x) <= 9:
+                self._trim_side = "right"
+                self._drag_clip_id = clip.clip_id
+            else:
+                self._trim_side = None
+                self._drag_clip_id = clip.clip_id
+                self._drag_offset_ms = position - clip.timeline_start_ms
             self.clip_selected.emit(clip.clip_id)
             self.update()
         self.seek_requested.emit(position)
@@ -113,8 +125,12 @@ class TimelineCanvas(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._drag_clip_id:
             position = self.x_to_position(event.position().x())
-            self.clip_move_requested.emit(self._drag_clip_id, max(0, position - self._drag_offset_ms))
+            if self._trim_side:
+                self.clip_trim_requested.emit(self._drag_clip_id, self._trim_side, position)
+            else:
+                self.clip_move_requested.emit(self._drag_clip_id, max(0, position - self._drag_offset_ms))
         self._drag_clip_id = None
+        self._trim_side = None
 
     def paintEvent(self, event: object) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -217,6 +233,7 @@ class TimelineWidget(QWidget):
     seek_requested = Signal(int)
     clip_selected = Signal(str)
     clip_move_requested = Signal(str, int)
+    clip_trim_requested = Signal(str, str, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -237,6 +254,7 @@ class TimelineWidget(QWidget):
         self.canvas.seek_requested.connect(self.seek_requested)
         self.canvas.clip_selected.connect(self.clip_selected)
         self.canvas.clip_move_requested.connect(self.clip_move_requested)
+        self.canvas.clip_trim_requested.connect(self.clip_trim_requested)
         self.zoom.valueChanged.connect(self.canvas.set_zoom)
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.canvas)

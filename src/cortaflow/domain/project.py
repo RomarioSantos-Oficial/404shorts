@@ -5,7 +5,14 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from cortaflow.domain.analysis import ClipSelectionSettings, ClipSuggestion, TimeRange
 from cortaflow.domain.clip import ClipRange
-from cortaflow.domain.editing import AudioSettings, ReframeSettings, SubtitleStyle, TimelineClip
+from cortaflow.domain.editing import (
+    AudioSettings,
+    LayerItem,
+    ReframeSettings,
+    SequenceDocument,
+    SubtitleStyle,
+    TimelineClip,
+)
 from cortaflow.domain.subtitle import Transcript
 from cortaflow.domain.tracking import CropFrame, FaceTrackPoint, SpeakerKeyframe, SpeakerOverride
 
@@ -50,6 +57,9 @@ class ProjectDocument(BaseModel):
     source_metadata: dict = Field(default_factory=dict)
     clips: list[ClipRange] = Field(default_factory=list)
     timeline_clips: list[TimelineClip] = Field(default_factory=list)
+    layers: list[LayerItem] = Field(default_factory=list)
+    sequences: list[SequenceDocument] = Field(default_factory=list)
+    active_sequence_id: str | None = None
     transcript: Transcript | None = None
     scenes: list[TimeRange] = Field(default_factory=list)
     silences: list[TimeRange] = Field(default_factory=list)

@@ -8,7 +8,7 @@ from queue import Empty, Queue
 from threading import Event, Thread
 
 from cortaflow.domain.clip import ClipRange, format_timestamp
-from cortaflow.domain.editing import AudioSettings, ReframeSettings, TimelineClip
+from cortaflow.domain.editing import AudioSettings, LayerItem, ReframeSettings, TimelineClip
 from cortaflow.domain.project import ExportSettings, WatermarkSettings
 from cortaflow.domain.project import ReframeKeyframe
 from cortaflow.domain.tracking import CropFrame
@@ -111,6 +111,24 @@ def build_render_command(
     return command
 
 
+def _escape_drawtext(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+        .replace("\n", "\\n")
+    )
+
+
+def _drawtext_font_option(font_name: str) -> str:
+    candidate = Path(font_name).expanduser()
+    if candidate.is_file():
+        return f"fontfile='{_escape_drawtext(str(candidate.resolve()))}'"
+    return f"font='{_escape_drawtext(font_name or 'Arial')}'"
+
+
 def output_dimensions(
     settings: ExportSettings,
     reframe: ReframeSettings | None = None,
@@ -177,6 +195,7 @@ def build_timeline_render_command(
     audio_settings: AudioSettings | None = None,
     source_size: tuple[int, int] | None = None,
     source_has_audio: bool = True,
+    layers: list[LayerItem] | None = None,
 ) -> list[str]:
     """Build a filter graph that consumes the persisted video/audio timeline."""
     video_clips = sorted(
@@ -263,6 +282,48 @@ def build_timeline_render_command(
             "eof_action=repeat[watermarked]"
         )
         final_video = "watermarked"
+    image_layers = [
+        layer for layer in (layers or [])
+        if layer.kind == "image" and layer.visible and layer.source_path and Path(layer.source_path).is_file()
+    ]
+    image_input_start = 2 if watermark and watermark.image_path else 1
+    for index, layer in enumerate(image_layers):
+        width_px = max(2, round(width * layer.width_percent / 100))
+        height_px = max(2, round(height * layer.height_percent / 100))
+        filters.append(
+            f"[{image_input_start + index}:v]format=rgba,scale={width_px}:{height_px},"
+            f"colorchannelmixer=aa={layer.opacity:.3f}[layerimg{index}]"
+        )
+        x = f"(W-w)*{layer.x_percent / 100:.4f}"
+        y = f"(H-h)*{layer.y_percent / 100:.4f}"
+        start = layer.timeline_start_ms / 1000
+        end = layer.timeline_end_ms / 1000
+        filters.append(
+            f"[{final_video}][layerimg{index}]overlay=x='{x}':y='{y}':"
+            f"eof_action=pass:enable='between(t,{start:.3f},{end:.3f})'[layerout{index}]"
+        )
+        final_video = f"layerout{index}"
+
+    text_layers = [
+        layer for layer in (layers or [])
+        if layer.kind == "text" and layer.visible and layer.text.strip()
+    ]
+    for index, layer in enumerate(text_layers):
+        text = _escape_drawtext(layer.text)
+        color = layer.color.lstrip("#") or "FFFFFF"
+        x = f"(w-text_w)*{layer.x_percent / 100:.4f}"
+        y = f"(h-text_h)*{layer.y_percent / 100:.4f}"
+        start = layer.timeline_start_ms / 1000
+        end = layer.timeline_end_ms / 1000
+        font_option = _drawtext_font_option(layer.font_name)
+        background = ":box=1:boxcolor=black@0.45:boxborderw=14" if layer.background else ""
+        filters.append(
+            f"[{final_video}]drawtext={font_option}:text='{text}':"
+            f"fontcolor=0x{color}@{layer.opacity:.3f}:fontsize={max(8, layer.font_size)}:"
+            f"x='{x}':y='{y}':enable='between(t,{start:.3f},{end:.3f})'{background}[textout{index}]"
+        )
+        final_video = f"textout{index}"
+
     escaped_subtitle = None
     if subtitle_path:
         escaped_subtitle = str(subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
@@ -317,6 +378,8 @@ def build_timeline_render_command(
     ]
     if watermark and watermark.image_path:
         command += ["-loop", "1", "-i", str(watermark.image_path.resolve())]
+    for layer in image_layers:
+        command += ["-loop", "1", "-i", str(Path(layer.source_path).resolve())]
     command += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
     if include_audio:
         command += ["-map", "[aout]"]
@@ -484,6 +547,7 @@ def render_timeline(
     source_has_audio: bool = True,
     progress: Callable[[dict[str, str]], None] | None = None,
     cancelled: Event | None = None,
+    layers: list[LayerItem] | None = None,
 ) -> Path:
     """Render the complete persisted timeline with atomic publication and fallback."""
     if destination.exists():
@@ -509,7 +573,7 @@ def render_timeline(
                 )
             command = build_timeline_render_command(
                 source, temporary, settings, clips, subtitle_path, preview, attempt_encoders,
-                crop_keyframes, reframe_settings, audio_settings, source_size, source_has_audio,
+                crop_keyframes, reframe_settings, audio_settings, source_size, source_has_audio, layers,
             )
             success, last_error = _run_render_process(
                 command,
