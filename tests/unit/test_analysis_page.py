@@ -80,3 +80,14 @@ def test_analysis_selection_goal_and_topic_are_persisted(qtbot) -> None:
     assert settings.selection_goal == "topic"
     assert settings.topic_prompt == "segurança em Python"
     assert page.topic_prompt.isEnabled()
+
+
+def test_analysis_context_audience_and_vocabulary_are_persisted(qtbot) -> None:
+    page = AnalysisPage()
+    qtbot.addWidget(page)
+    page.audience.setText("torcedores brasileiros")
+    with qtbot.waitSignal(page.selection_settings_changed, timeout=1_000) as emitted:
+        page.vocabulary.setText("Palmeiras, Flamengo, Cimed")
+    settings = emitted.args[0]
+    assert settings.audience == "torcedores brasileiros"
+    assert settings.vocabulary == ["Palmeiras", "Flamengo", "Cimed"]

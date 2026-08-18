@@ -135,6 +135,16 @@ class AnalysisPage(QWidget):
         self.topic_prompt.setPlaceholderText("Tema que deve aparecer nos cortes")
         goal_row.addWidget(self.topic_prompt, 1)
         layout.addLayout(goal_row)
+        context_row = QHBoxLayout()
+        context_row.addWidget(QLabel("Público"))
+        self.audience = QLineEdit()
+        self.audience.setPlaceholderText("Ex.: torcedores brasileiros interessados em opinião")
+        context_row.addWidget(self.audience, 1)
+        context_row.addWidget(QLabel("Vocabulário-chave"))
+        self.vocabulary = QLineEdit()
+        self.vocabulary.setPlaceholderText("Separe termos por vírgula: Palmeiras, Flamengo, Cimed")
+        context_row.addWidget(self.vocabulary, 1)
+        layout.addLayout(context_row)
         self.ranking_status = QLabel(semantic_status)
         self.ranking_status.setWordWrap(True)
         layout.addWidget(self.ranking_status)
@@ -231,6 +241,8 @@ class AnalysisPage(QWidget):
         self.ranking_mode.currentIndexChanged.connect(self._selection_edited)
         self.selection_goal.currentIndexChanged.connect(self._selection_edited)
         self.topic_prompt.textChanged.connect(self._selection_edited)
+        self.audience.textChanged.connect(self._selection_edited)
+        self.vocabulary.textChanged.connect(self._selection_edited)
         self.auto_accept.toggled.connect(self._selection_edited)
         self._load_selection_settings(self.selection_settings)
         self._update_actions()
@@ -368,6 +380,12 @@ class AnalysisPage(QWidget):
             ranking_mode=self.ranking_mode.currentData(),
             selection_goal=goal,
             topic_prompt=topic,
+            audience=self.audience.text().strip(),
+            vocabulary=[
+                item.strip()
+                for item in self.vocabulary.text().split(",")
+                if item.strip()
+            ][:60],
             auto_accept_threshold=(
                 self.auto_accept_score.value() / 100 if self.auto_accept.isChecked() else None
             ),
@@ -383,6 +401,8 @@ class AnalysisPage(QWidget):
             self.ranking_mode,
             self.selection_goal,
             self.topic_prompt,
+            self.audience,
+            self.vocabulary,
             self.auto_accept,
             self.auto_accept_score,
         )
@@ -398,6 +418,8 @@ class AnalysisPage(QWidget):
         )
         self.topic_prompt.setText(settings.topic_prompt)
         self.topic_prompt.setEnabled(settings.selection_goal == "topic")
+        self.audience.setText(settings.audience)
+        self.vocabulary.setText(", ".join(settings.vocabulary))
         self.auto_accept.setChecked(settings.auto_accept_threshold is not None)
         if settings.auto_accept_threshold is not None:
             self.auto_accept_score.setValue(round(settings.auto_accept_threshold * 100))

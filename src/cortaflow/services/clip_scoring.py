@@ -20,6 +20,7 @@ from cortaflow.services.editorial_validation import (
     context_around,
 )
 from cortaflow.services.long_discourse import resolve_long_discourse
+from cortaflow.services.topic_segmentation import segment_topics
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -131,23 +132,54 @@ def suggest_clips(
     energy_index = _EnergyIndex.build(audio_evidence)
     face_index = _FaceIndex.build(face_tracks)
     words = transcript.words
+    minimum_ms = configured.min_seconds * 1000
+    maximum_ms = configured.max_seconds * 1000
+    topic_segments = segment_topics(words, minimum_ms=minimum_ms, maximum_ms=maximum_ms)
+    topic_boundaries = tuple(
+        sorted(
+            {
+                point
+                for segment in topic_segments
+                for point in (segment.start_ms, segment.end_ms)
+            }
+        )
+    )
     start_indexes = {0}
     start_indexes.update(
         index + 1
         for index, word in enumerate(words[:-1])
         if _ends_sentence(word.text)
     )
-    for boundary in speech_boundaries:
+    for boundary in speech_boundaries + topic_boundaries:
         nearest = min(range(len(words)), key=lambda index: abs(words[index].start_ms - boundary))
         if abs(words[nearest].start_ms - boundary) <= 1_500:
             start_indexes.add(nearest)
+
+    if progress and len(topic_segments) > 1:
+        progress(
+            {
+                "status": "topic_segmentation",
+                "message": (
+                    f"{len(topic_segments)} blocos temáticos identificados; "
+                    "gerando candidatos dentro de cada assunto."
+                ),
+                "topic_segment_count": len(topic_segments),
+                "topic_segments": [
+                    {
+                        "start_ms": item.start_ms,
+                        "end_ms": item.end_ms,
+                        "label": item.label,
+                        "keywords": item.keywords,
+                    }
+                    for item in topic_segments
+                ],
+            }
+        )
 
     candidates: list[ClipSuggestion] = []
     seen_ranges: set[tuple[int, int]] = set()
     natural_candidate_count = 0
     detailed_ranges: list[tuple[int, int]] = []
-    minimum_ms = configured.min_seconds * 1000
-    maximum_ms = configured.max_seconds * 1000
     for start_index in sorted(start_indexes):
         if cancelled and cancelled.is_set():
             break
@@ -164,8 +196,10 @@ def suggest_clips(
             fallback_ends.append(end_index)
             if (
                 _ends_sentence(word.text)
-                or _near_boundary(word.end_ms, speech_boundaries)
+                or                 _near_boundary(word.end_ms, speech_boundaries)
+                or _near_boundary(word.end_ms, topic_boundaries)
                 or _near_transcript_pause(words, end_index)
+
             ):
                 natural_ends.append(end_index)
         # A fallback is only used when a range contains no sentence/pause ending.
@@ -222,6 +256,7 @@ def suggest_clips(
             silences,
             scene_boundaries,
             speech_boundaries,
+            topic_boundaries,
             energy_index,
             face_index,
         )
@@ -360,6 +395,7 @@ def _score_candidate(
     silences: list[TimeRange],
     scene_boundaries: tuple[int, ...],
     speech_boundaries: tuple[int, ...],
+    topic_boundaries: tuple[int, ...],
     energy_index: _EnergyIndex,
     face_index: _FaceIndex,
 ) -> ClipSuggestion | None:
@@ -400,8 +436,20 @@ def _score_candidate(
     aligned_start = editorial.start_safe and (
         natural_start or _near_boundary(start_word.start_ms, speech_boundaries)
     )
-    aligned_end = editorial.end_safe and _ends_sentence(end_word.text)
+    aligned_end = editorial.end_safe and (
+        _ends_sentence(end_word.text)
+        or _near_boundary(end_word.end_ms, topic_boundaries)
+    )
     boundary_quality = editorial.score
+    topic_alignment = (
+        int(_near_boundary(start_word.start_ms, topic_boundaries))
+        + int(_near_boundary(end_word.end_ms, topic_boundaries))
+    ) / 2
+    topic_focus = _topic_prompt_score(
+        excerpt,
+        settings.topic_prompt,
+        settings.vocabulary,
+    )
     scene_alignment = (
         int(_near_boundary(start_word.start_ms, scene_boundaries))
         + int(_near_boundary(end_word.end_ms, scene_boundaries))
@@ -436,6 +484,8 @@ def _score_candidate(
         "rosto": face,
         "qualidade_audiovisual": round(0.55 * face + 0.45 * energy, 3),
         "subideia_resolvida": float(resegmented),
+        "tópico": topic_focus,
+        "mudança_tema": topic_alignment,
     }
     weights = {
         "fala": 0.08,
@@ -451,6 +501,8 @@ def _score_candidate(
         "energia": 0.03,
         "cena": 0.02,
         "rosto": 0.03,
+        "tópico": 0.06,
+        "mudança_tema": 0.04,
     }
     score = sum(components[name] * weight for name, weight in weights.items())
     reasons = ["ideia com início e fim naturais", "boa densidade de fala"]
@@ -466,6 +518,8 @@ def _score_candidate(
         reasons.append("rosto contínuo")
     if resegmented:
         reasons.append("subideia extraída de discussão acima de 179 s")
+    if topic_alignment or topic_focus > 0.5:
+        reasons.append("bloco temático identificável")
     if question_ending:
         reasons.append("pergunta final exige validação da resposta")
     return ClipSuggestion(
@@ -527,6 +581,16 @@ def _flow_score(words: list[str], aligned_start: bool, aligned_end: bool) -> flo
     conclusion = any(_phrase_present(ending, term) for term in _CONCLUSION_TERMS)
     sentence_end = _ends_sentence(words[-1])
     return min(1.0, 0.35 * aligned_start + 0.35 * aligned_end + 0.2 * sentence_end + 0.1 * conclusion)
+
+
+def _topic_prompt_score(text: str, prompt: str, vocabulary: list[str] | None = None) -> float:
+    """Score overlap with the user-provided subject without requiring an LLM."""
+    prompt_terms = _content_terms(prompt)
+    prompt_terms |= _content_terms(" ".join(vocabulary or []))
+    if not prompt_terms:
+        return 0.5
+    excerpt_terms = _content_terms(text)
+    return min(1.0, len(prompt_terms & excerpt_terms) / max(1, min(6, len(prompt_terms))))
 
 
 def _keyword_score(text: str, terms: set[str]) -> float:
