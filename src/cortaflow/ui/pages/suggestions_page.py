@@ -174,7 +174,7 @@ class SuggestionsPage(QWidget):
                 item.title,
                 item.transcript_excerpt,
                 f"{item.quality_score:.0%}",
-                f"{self._editorial_text(item)} · {item.reason}",
+                self._reason_text(item),
                 self._framing_text(item),
                 self._status_text(item.status),
                 "Original",
@@ -189,7 +189,8 @@ class SuggestionsPage(QWidget):
             confidence = "—" if item.confidence_score is None else f"{item.confidence_score:.0%}"
             self.table.item(row, 5).setToolTip(
                 f"Validade: {self._editorial_text(item)} · Relevância: {relevance} · "
-                f"Confiança: {confidence} · Tendência: não avaliada\nComponentes: {details}"
+                f"Confiança: {confidence} · Tendência: não avaliada\n"
+                f"{self._explainability_text(item)}\nComponentes: {details}"
             )
             self.table.item(row, 7).setToolTip(
                 "O rosto falante/principal foi verificado em todas as amostras do intervalo, "
@@ -248,9 +249,7 @@ class SuggestionsPage(QWidget):
             payload["editorial_status"] = "validated"
         self.suggestions[row] = ClipSuggestion.model_validate(payload)
         self.table.item(row, 8).setText(self._status_text(status))
-        self.table.item(row, 6).setText(
-            f"{self._editorial_text(self.suggestions[row])} · {self.suggestions[row].reason}"
-        )
+        self.table.item(row, 6).setText(self._reason_text(self.suggestions[row]))
         self._update_export_button()
         self.suggestions_changed.emit(list(self.suggestions))
 
@@ -457,6 +456,28 @@ class SuggestionsPage(QWidget):
         self.preview_player.setVideoOutput(None)
         self.preview_player.setAudioOutput(None)
         super().closeEvent(event)
+
+    @staticmethod
+    def _reason_text(item: ClipSuggestion) -> str:
+        text = f"{SuggestionsPage._editorial_text(item)} · {item.reason}"
+        if item.central_claim:
+            text += f" Tese: {item.central_claim}."
+        if item.repair_history:
+            text += f" Reparos: {'; '.join(item.repair_history)}."
+        return text[:600]
+
+    @staticmethod
+    def _explainability_text(item: ClipSuggestion) -> str:
+        parts = []
+        if item.central_claim:
+            parts.append(f"Tese: {item.central_claim}")
+        if item.evidence_start:
+            parts.append(f"Evidência inicial: {item.evidence_start}")
+        if item.evidence_end:
+            parts.append(f"Evidência final: {item.evidence_end}")
+        if item.after_continues_same_answer:
+            parts.append("contexto seguinte continua a resposta")
+        return " · ".join(parts) or "Sem evidência semântica adicional."
 
     @staticmethod
     def _preview_label(preview: object) -> str:

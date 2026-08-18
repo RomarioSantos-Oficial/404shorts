@@ -111,12 +111,17 @@ class PropertiesPanel(QWidget):
         for label, value in (("Superior", "top"), ("Centro", "center"), ("Inferior", "bottom")):
             self.subtitle_position.addItem(label, value)
         self.max_words = self._spin(2, 7)
+        self.subtitle_preset = QComboBox()
+        self.subtitle_preset.addItem("Clean · leitura confortável", "clean")
+        self.subtitle_preset.addItem("Dynamic · palavra falada", "dynamic")
+        self.subtitle_preset.addItem("Viral · impacto rápido", "viral")
         self.animated = QCheckBox("Destaque da palavra falada")
         for label, widget in (
             ("Fonte", self.font_name), ("Tamanho", self.font_size), ("Cor", self.primary_color),
             ("Destaque", self.highlight_color),
             ("Contorno", self.outline_color), ("Largura", self.outline_width), ("Sombra", self.shadow),
             ("Posição", self.subtitle_position), ("Máx. palavras", self.max_words),
+            ("Preset", self.subtitle_preset),
         ):
             form.addRow(label, widget)
         form.addRow(self.subtitle_background)
@@ -125,7 +130,7 @@ class PropertiesPanel(QWidget):
         for widget in (
             self.font_name, self.font_size, self.primary_color, self.highlight_color, self.outline_color,
             self.outline_width, self.shadow, self.subtitle_background,
-            self.subtitle_position, self.max_words, self.animated,
+            self.subtitle_position, self.max_words, self.subtitle_preset, self.animated,
         ):
             self._connect_change(widget)
 
@@ -184,6 +189,7 @@ class PropertiesPanel(QWidget):
         self.subtitle_background.setChecked(subtitle.background)
         self.subtitle_position.setCurrentIndex(self.subtitle_position.findData(subtitle.position))
         self.max_words.setValue(subtitle.max_words)
+        self.subtitle_preset.setCurrentIndex(self.subtitle_preset.findData(subtitle.preset))
         self.animated.setChecked(subtitle.animated)
         self.audio_volume.setValue(audio.volume)
         self.normalize_audio.setChecked(audio.normalize)
@@ -226,7 +232,8 @@ class PropertiesPanel(QWidget):
                 highlight_color=self.highlight_color.text().strip(),
                 outline_width=self.outline_width.value(), shadow=self.shadow.value(),
                 background=self.subtitle_background.isChecked(), position=self.subtitle_position.currentData(),
-                max_words=self.max_words.value(), animated=self.animated.isChecked(),
+                max_words=self.max_words.value(), preset=self.subtitle_preset.currentData(),
+                animated=self.animated.isChecked(),
             )
             audio = AudioSettings(volume=self.audio_volume.value(), normalize=self.normalize_audio.isChecked())
             width, height = self.resolution.currentData()

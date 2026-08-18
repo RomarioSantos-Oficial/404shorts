@@ -26,6 +26,7 @@ from cortaflow.domain.editing import SubtitleStyle
 from cortaflow.services.subtitles import (
     burn_subtitles,
     export_subtitles,
+    export_vtt,
     merge_manual_corrections,
     save_transcript,
 )
@@ -100,9 +101,11 @@ class SubtitlesPage(QWidget):
         self.srt_button.clicked.connect(lambda: self.export_subtitle_file(False))
         self.ass_button = QPushButton("Exportar ASS animado")
         self.ass_button.clicked.connect(lambda: self.export_subtitle_file(True))
+        self.vtt_button = QPushButton("Exportar WebVTT")
+        self.vtt_button.clicked.connect(self.export_vtt_file)
         self.burn_button = QPushButton("Aplicar legenda ao vídeo")
         self.burn_button.clicked.connect(self.start_burn)
-        for button in (self.json_button, self.srt_button, self.ass_button, self.burn_button):
+        for button in (self.json_button, self.srt_button, self.ass_button, self.vtt_button, self.burn_button):
             buttons.addWidget(button)
         buttons.addStretch()
         layout.addLayout(buttons)
@@ -224,6 +227,16 @@ class SubtitlesPage(QWidget):
             export_subtitles(self.cues, Path(filename), animated=animated, style=self.style)
             self.status.setText(f"Legendas exportadas: {filename}")
 
+    def export_vtt_file(self) -> None:
+        if not self.cues:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Exportar WebVTT", "legendas.vtt", "Legendas WebVTT (*.vtt)"
+        )
+        if filename:
+            export_vtt(self.cues, Path(filename))
+            self.status.setText(f"WebVTT exportado: {filename}")
+
     def start_burn(self) -> None:
         if not self.source_path or not self.cues:
             QMessageBox.warning(self, "Legenda ausente", "Transcreva ou carregue legendas primeiro.")
@@ -285,7 +298,7 @@ class SubtitlesPage(QWidget):
         has_cues = bool(self.cues)
         self.transcribe_button.setEnabled(self.source_path is not None and not busy)
         self.cancel_button.setEnabled(busy)
-        for button in (self.json_button, self.srt_button, self.ass_button):
+        for button in (self.json_button, self.srt_button, self.ass_button, self.vtt_button):
             button.setEnabled(has_cues and not busy)
         self.json_button.setEnabled(self.transcript is not None and not busy)
         self.burn_button.setEnabled(self.source_path is not None and has_cues and not busy)

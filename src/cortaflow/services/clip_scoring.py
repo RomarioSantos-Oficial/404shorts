@@ -19,6 +19,7 @@ from cortaflow.services.editorial_validation import (
     belongs_to_oversized_discourse,
     context_around,
 )
+from cortaflow.services.long_discourse import resolve_long_discourse
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -179,6 +180,27 @@ def suggest_clips(
             detailed_ends.update((available[0], available[-1]))
         detailed_ranges.extend((start_index, end_index) for end_index in sorted(detailed_ends))
 
+    resolved_subideas = resolve_long_discourse(
+        words,
+        minimum_ms=minimum_ms,
+        maximum_ms=maximum_ms,
+    )
+    detailed_ranges.extend(
+        (item.start_index, item.end_index)
+        for item in resolved_subideas
+    )
+    if progress and resolved_subideas:
+        progress(
+            {
+                "status": "long_discourse_resolved",
+                "message": (
+                    f"{len(resolved_subideas)} subideias recuperadas de discurso longo; "
+                    "todas permanecem dentro do limite físico de 179 s."
+                ),
+                "resolved_subidea_count": len(resolved_subideas),
+            }
+        )
+
     for start_index, end_index in detailed_ranges:
         if cancelled and cancelled.is_set():
             break
@@ -338,10 +360,25 @@ def _score_candidate(
     face_index: _FaceIndex,
 ) -> ClipSuggestion | None:
     editorial = assess_word_range(words, start_index, end_index, silences)
-    if not editorial.passes:
-        return None
     start_word = words[start_index]
     end_word = words[end_index]
+    recoverable_editorial_issue = (
+        not editorial.passes
+        and _ends_sentence(end_word.text)
+        and any(
+            (
+                not editorial.start_safe,
+                not editorial.start_independent,
+                not editorial.end_safe,
+                not editorial.end_complete,
+            )
+        )
+    )
+    # Keep a complete natural ending when the issue is repairable by the
+    # semantic reviewer. Mid-speech fallback ranges without a sentence ending
+    # remain rejected, so visual scenes can never authorize an unsafe cut.
+    if not editorial.passes and not recoverable_editorial_issue:
+        return None
     duration = end_word.end_ms - start_word.start_ms
     excerpt_words = [word.text for word in words[start_index : end_index + 1]]
     excerpt = " ".join(excerpt_words)
@@ -393,6 +430,8 @@ def _score_candidate(
         "energia": energy,
         "cena": scene_alignment,
         "rosto": face,
+        "qualidade_audiovisual": round(0.55 * face + 0.45 * energy, 3),
+        "subideia_resolvida": float(resegmented),
     }
     weights = {
         "fala": 0.08,
@@ -434,16 +473,25 @@ def _score_candidate(
         reason=", ".join(reasons).capitalize() + ".",
         score_components={name: round(value, 3) for name, value in components.items()},
         editorial_status=(
-            "needs_review" if resegmented or question_ending else "validated"
+            "needs_review"
+            if resegmented or question_ending or not editorial.passes
+            else "validated"
         ),
         editorial_score=round(editorial.score, 3),
         relevance_score=round(min(1.0, 0.55 * value + 0.45 * flow), 3),
         confidence_score=round(min(1.0, 0.65 * editorial.score + 0.35 * speech_ratio), 3),
+        potential_score=round(min(1.0, score), 3),
+        production_quality_score=round(0.55 * face + 0.45 * energy, 3),
+        opening_dependency=("repairable" if not editorial.start_independent else "none"),
+        ending_state=("complete" if editorial.end_complete else "repairable"),
+        repair_history=[editorial.reason] if not editorial.passes else [],
         context_before=before,
         context_after=after,
         resegmented_from_long_unit=resegmented,
         selection_goal=settings.selection_goal,
         topic_prompt=settings.topic_prompt,
+        audience=settings.audience,
+        vocabulary=list(settings.vocabulary),
     )
 
 

@@ -70,11 +70,11 @@ def render_project_export(
         subtitle_path = None
         if timeline_clips:
             output_cues, output_words = _timeline_subtitle_track(
-                cues, words or [], timeline_clips, subtitle_style.max_words
+                cues, words or [], timeline_clips, subtitle_style.max_words, subtitle_style.preset
             )
         else:
             output_cues, output_words = clip_subtitle_track(
-                cues, words or [], clip, subtitle_style.max_words
+                cues, words or [], clip, subtitle_style.max_words, subtitle_style.preset
             )
         if output_cues:
             subtitle_path = export_subtitles(
@@ -125,6 +125,7 @@ def _timeline_subtitle_track(
     words: list[TranscriptWord],
     clips: list[TimelineClip],
     max_words: int,
+    preset: str = "dynamic",
 ) -> tuple[list[SubtitleCue], list[TranscriptWord]]:
     """Map source subtitle timestamps into each edited video timeline segment."""
     output_cues: list[SubtitleCue] = []
@@ -134,7 +135,9 @@ def _timeline_subtitle_track(
         key=lambda clip: (clip.timeline_start_ms, clip.clip_id),
     ):
         source_clip = ClipRange(start_ms=item.source_start_ms, end_ms=item.source_end_ms)
-        segment_cues, segment_words = clip_subtitle_track(cues, words, source_clip, max_words)
+        segment_cues, segment_words = clip_subtitle_track(
+            cues, words, source_clip, max_words, preset
+        )
         output_cues.extend(
             cue.model_copy(
                 update={

@@ -17,27 +17,63 @@ from cortaflow.infrastructure.ffmpeg import find_executable
 from cortaflow.services.transcoder import ExportCancelled
 
 
-def group_words(words: list[TranscriptWord], min_words: int = 2, max_words: int = 7, max_chars: int = 42) -> list[SubtitleCue]:
-    """Group timestamped words around punctuation and readability limits."""
+def group_words(
+    words: list[TranscriptWord],
+    min_words: int = 2,
+    max_words: int = 7,
+    max_chars: int = 42,
+    preset: str = "dynamic",
+) -> list[SubtitleCue]:
+    """Group words using punctuation, pauses, duration and a readability preset."""
     if not words:
         return []
+    preset_limits = {
+        "clean": (max_words, max_chars, 3_200, 900),
+        "dynamic": (min(max_words, 6), min(max_chars, 38), 2_400, 650),
+        "viral": (min(max_words, 4), min(max_chars, 28), 1_800, 450),
+    }
+    effective_max_words, effective_max_chars, max_duration_ms, pause_ms = preset_limits.get(
+        preset, preset_limits["dynamic"]
+    )
     cues: list[SubtitleCue] = []
     current: list[TranscriptWord] = []
     for word in words:
+        previous = current[-1] if current else None
+        if previous and word.start_ms - previous.end_ms >= pause_ms and len(current) >= min_words:
+            cues.append(_cue_from_words(current))
+            current = []
         current.append(word)
         text = " ".join(item.text.strip() for item in current).strip()
         punctuated = word.text.rstrip().endswith((".", "!", "?", ":", ";"))
-        should_break = len(current) >= max_words or len(text) >= max_chars or (punctuated and len(current) >= min_words)
+        duration = word.end_ms - current[0].start_ms
+        should_break = (
+            len(current) >= effective_max_words
+            or len(text) >= effective_max_chars
+            or duration >= max_duration_ms
+            or (punctuated and len(current) >= min_words)
+        )
         if should_break:
-            cues.append(SubtitleCue(start_ms=current[0].start_ms, end_ms=current[-1].end_ms, text=text))
+            cues.append(_cue_from_words(current))
             current = []
     if current:
-        if len(current) == 1 and cues and len(cues[-1].text.split()) < max_words:
+        if len(current) == 1 and cues and len(cues[-1].text.split()) < effective_max_words:
             previous = cues[-1]
-            cues[-1] = SubtitleCue(start_ms=previous.start_ms, end_ms=current[-1].end_ms, text=f"{previous.text} {current[0].text}".strip())
+            cues[-1] = SubtitleCue(
+                start_ms=previous.start_ms,
+                end_ms=current[-1].end_ms,
+                text=f"{previous.text} {current[0].text}".strip(),
+            )
         else:
-            cues.append(SubtitleCue(start_ms=current[0].start_ms, end_ms=current[-1].end_ms, text=" ".join(item.text.strip() for item in current).strip()))
+            cues.append(_cue_from_words(current))
     return cues
+
+
+def _cue_from_words(words: list[TranscriptWord]) -> SubtitleCue:
+    return SubtitleCue(
+        start_ms=words[0].start_ms,
+        end_ms=words[-1].end_ms,
+        text=" ".join(item.text.strip() for item in words).strip(),
+    )
 
 
 def save_transcript(transcript: Transcript, path: Path) -> Path:
@@ -106,11 +142,41 @@ def export_subtitles(
     return path
 
 
+def export_vtt(cues: list[SubtitleCue], path: Path) -> Path:
+    """Write standards-compliant WebVTT cues with deterministic timestamps."""
+    lines = ["WEBVTT", ""]
+    for index, cue in enumerate(cues, start=1):
+        lines.extend(
+            [
+                str(index),
+                f"{_vtt_timestamp(cue.start_ms)} --> {_vtt_timestamp(cue.end_ms)}",
+                _vtt_text(cue.text),
+                "",
+            ]
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _vtt_text(text: str) -> str:
+    return _wrap_two_lines(text).replace(chr(92) + "N", chr(10))
+
+
+def _vtt_timestamp(milliseconds: int) -> str:
+    milliseconds = max(0, milliseconds)
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, millis = divmod(remainder, 1_000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+
+
 def clip_subtitle_track(
     cues: list[SubtitleCue],
     words: list[TranscriptWord],
     clip: ClipRange,
     max_words: int = 7,
+    preset: str = "dynamic",
 ) -> tuple[list[SubtitleCue], list[TranscriptWord]]:
     """Clip source timestamps and shift the subtitle track to output time zero."""
     clipped_words = [
@@ -125,7 +191,7 @@ def clip_subtitle_track(
     ]
     clipped_words = [word for word in clipped_words if word.end_ms > word.start_ms]
     if clipped_words:
-        generated = group_words(clipped_words, max_words=max_words)
+        generated = group_words(clipped_words, max_words=max_words, preset=preset)
         manual = [
             SubtitleCue(
                 start_ms=max(cue.start_ms, clip.start_ms) - clip.start_ms,

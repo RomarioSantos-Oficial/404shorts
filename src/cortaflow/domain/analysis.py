@@ -24,6 +24,8 @@ class ClipSelectionSettings(BaseModel):
     ranking_mode: Literal["automatic", "heuristic"] = "automatic"
     selection_goal: Literal["balanced", "faithful", "viral", "topic"] = "balanced"
     topic_prompt: str = Field(default="", max_length=240)
+    audience: str = Field(default="", max_length=160)
+    vocabulary: list[str] = Field(default_factory=list, max_length=60)
     auto_accept_threshold: float | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
@@ -49,12 +51,24 @@ class ClipSuggestion(BaseModel):
     editorial_score: float | None = Field(default=None, ge=0, le=1)
     relevance_score: float | None = Field(default=None, ge=0, le=1)
     confidence_score: float | None = Field(default=None, ge=0, le=1)
+    potential_score: float | None = Field(default=None, ge=0, le=1)
+    production_quality_score: float | None = Field(default=None, ge=0, le=1)
     trend_status: Literal["not_evaluated", "evaluated"] = "not_evaluated"
+    central_claim: str = ""
+    payoff: str = ""
+    evidence_start: str = ""
+    evidence_end: str = ""
+    opening_dependency: Literal["none", "repairable", "strong", "unknown"] = "unknown"
+    ending_state: Literal["complete", "repairable", "ongoing", "unknown"] = "unknown"
+    after_continues_same_answer: bool = False
+    repair_history: list[str] = Field(default_factory=list, max_length=12)
     context_before: str = ""
     context_after: str = ""
     resegmented_from_long_unit: bool = False
     selection_goal: Literal["balanced", "faithful", "viral", "topic"] = "balanced"
     topic_prompt: str = ""
+    audience: str = ""
+    vocabulary: list[str] = Field(default_factory=list, max_length=60)
     status: Literal["pending", "accepted", "rejected"] = "pending"
     framing_status: Literal["pending", "validated", "needs_review", "no_face"] = "pending"
     framing_score: float | None = Field(default=None, ge=0, le=1)

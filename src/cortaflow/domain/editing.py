@@ -42,6 +42,7 @@ class SubtitleStyle(BaseModel):
     background: bool = False
     position: Literal["top", "center", "bottom"] = "bottom"
     max_words: int = Field(default=7, ge=2, le=7)
+    preset: Literal["clean", "dynamic", "viral"] = "dynamic"
     animated: bool = True
 
 

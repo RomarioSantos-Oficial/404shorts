@@ -290,7 +290,7 @@ class OllamaClipRanker(QwenClipRanker):
         assets: OllamaAssets,
         timeout_seconds: int = 300,
         context_size: int = 8_192,
-        thinking_verification: bool = True,
+        thinking_verification: bool = False,
     ) -> None:
         self.assets = assets
         self.timeout_seconds = timeout_seconds
@@ -310,7 +310,7 @@ class OllamaClipRanker(QwenClipRanker):
             return []
         fallback = HeuristicClipRanker()
         try:
-            batch_count = math.ceil(len(candidates) / 6)
+            batch_count = max(1, math.ceil(len(candidates) / 6))
             batches = [candidates[offset::batch_count] for offset in range(batch_count)]
             quota = max(1, math.ceil(max_results / batch_count))
             semantic_pool: list[ClipSuggestion] = []
@@ -560,7 +560,11 @@ def _ranking_prompt(
             "signals": item.score_components,
             "selection_goal": item.selection_goal,
             "topic_prompt": item.topic_prompt,
+            "audience": item.audience,
+            "vocabulary": item.vocabulary,
             "resegmented_from_long_unit": item.resegmented_from_long_unit,
+            "existing_editorial_score": item.editorial_score,
+            "existing_production_quality": item.production_quality_score,
             "context_before": _semantic_excerpt(item.context_before, 450),
             "transcript": _semantic_excerpt(item.transcript_excerpt, 1_200),
             "context_after": _semantic_excerpt(item.context_after, 450),
@@ -739,6 +743,7 @@ def _consensus_confidence(
     left: SemanticCandidateScore,
     right: SemanticCandidateScore,
 ) -> float:
+    """Score semantic confidence using the five report-defined dimensions."""
     left_decision = _semantic_decision(original, left)[0]
     right_decision = _semantic_decision(original, right)[0]
     if left_decision == right_decision:
@@ -756,26 +761,35 @@ def _consensus_confidence(
             right.evidence_end,
         )
     ) / 4
-    boundary = original.editorial_score if original.editorial_score is not None else 1.0
-    categorical_pairs = (
+    completeness = (left.completeness + right.completeness) / 8
+    boundary_stability = (
+        1.0
+        if (
+            left.opening_dependency == right.opening_dependency
+            and left.ending_state == right.ending_state
+        )
+        else 0.5
+    )
+    context_pairs = (
         (left.topic_stated_in_clip, right.topic_stated_in_clip),
-        (left.opening_dependency, right.opening_dependency),
         (left.question_answer_complete, right.question_answer_complete),
-        (left.ending_state, right.ending_state),
         (left.after_continues_same_answer, right.after_continues_same_answer),
         (left.long_unit_importance, right.long_unit_importance),
     )
-    order_stability = sum(a == b for a, b in categorical_pairs) / len(categorical_pairs)
-    return round(
-        min(
-            1.0,
-            .4 * decision_agreement
-            + .3 * evidence_coverage
-            + .2 * boundary
-            + .1 * order_stability,
-        ),
-        3,
+    context_consistency = sum(a == b for a, b in context_pairs) / len(context_pairs)
+    confidence = min(
+        1.0,
+        .30 * decision_agreement
+        + .25 * evidence_coverage
+        + .20 * completeness
+        + .15 * boundary_stability
+        + .10 * context_consistency,
     )
+    # A hard disagreement is intentionally capped at the historical 0.55
+    # review confidence, avoiding automatic approval by score arithmetic.
+    if decision_agreement == 0.0:
+        confidence = min(confidence, 0.55)
+    return round(confidence, 3)
 
 
 def _evidence_occurs(transcript: str, evidence: str) -> bool:
@@ -1005,10 +1019,18 @@ def _validated_candidate(
             "title": title,
             "reason": f"IA local: {reason}",
             "quality_score": potential,
+            "potential_score": potential,
             "score_components": components,
             "editorial_status": "validated",
             "editorial_score": round(semantic.completeness / 4, 3),
             "relevance_score": round(semantic.relevance / 4, 3),
+            "central_claim": semantic.central_claim,
+            "payoff": semantic.reason,
+            "evidence_start": semantic.evidence_start,
+            "evidence_end": semantic.evidence_end,
+            "opening_dependency": semantic.opening_dependency,
+            "ending_state": semantic.ending_state,
+            "after_continues_same_answer": semantic.after_continues_same_answer,
             "confidence_score": (
                 confidence
                 if confidence is not None
@@ -1052,6 +1074,13 @@ def _review_candidate(
             "score_components": components,
             "editorial_score": round(semantic.completeness / 4, 3),
             "relevance_score": round(semantic.relevance / 4, 3),
+            "central_claim": semantic.central_claim,
+            "payoff": semantic.reason,
+            "evidence_start": semantic.evidence_start,
+            "evidence_end": semantic.evidence_end,
+            "opening_dependency": semantic.opening_dependency,
+            "ending_state": semantic.ending_state,
+            "after_continues_same_answer": semantic.after_continues_same_answer,
             "confidence_score": (
                 confidence
                 if confidence is not None
@@ -1153,7 +1182,15 @@ def _potential_score(
     original: ClipSuggestion,
     semantic: SemanticCandidateScore,
 ) -> float:
-    """Calculate potential only after editorial validity has passed."""
+    """Calculate potential only after editorial validity has passed.
+
+    The balanced baseline follows the report: hook 25%, flow/conclusion 25%,
+    value 20%, relevance 15%, emotion/shareability 10% and production quality
+    5%. Other modes are deliberate editorial variations, not hidden heuristics.
+    """
+    production = original.production_quality_score
+    if production is None:
+        production = original.score_components.get("qualidade_audiovisual", original.quality_score)
     factors = {
         "relevance": semantic.relevance / 4,
         "hook": semantic.hook / 4,
@@ -1161,25 +1198,25 @@ def _potential_score(
         "value": semantic.value / 4,
         "emotion": semantic.emotion / 4,
         "shareability": semantic.shareability / 4,
+        "production": production,
         "novelty": semantic.novelty / 4,
-        "local": original.quality_score,
     }
     weights = {
         "balanced": {
-            "relevance": .12, "hook": .16, "flow": .18, "value": .16,
-            "emotion": .08, "shareability": .14, "novelty": .10, "local": .06,
+            "relevance": .15, "hook": .25, "flow": .25, "value": .20,
+            "emotion": .05, "shareability": .05, "production": .05, "novelty": 0,
         },
         "faithful": {
-            "relevance": .22, "hook": .10, "flow": .24, "value": .18,
-            "emotion": .06, "shareability": .08, "novelty": .06, "local": .06,
+            "relevance": .20, "hook": .15, "flow": .28, "value": .22,
+            "emotion": .03, "shareability": .02, "production": .05, "novelty": .05,
         },
         "viral": {
-            "relevance": .06, "hook": .22, "flow": .16, "value": .13,
-            "emotion": .12, "shareability": .19, "novelty": .06, "local": .06,
+            "relevance": .08, "hook": .28, "flow": .18, "value": .10,
+            "emotion": .12, "shareability": .16, "production": .05, "novelty": .03,
         },
         "topic": {
-            "relevance": .30, "hook": .10, "flow": .18, "value": .14,
-            "emotion": .06, "shareability": .10, "novelty": .06, "local": .06,
+            "relevance": .30, "hook": .16, "flow": .22, "value": .20,
+            "emotion": .02, "shareability": .02, "production": .05, "novelty": .03,
         },
     }[original.selection_goal]
     return round(min(1.0, sum(factors[name] * weight for name, weight in weights.items())), 3)
